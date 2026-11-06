@@ -546,7 +546,7 @@ export default function App() {
 
   // Tab panel content component
   const TabContent = (
-    <div className="flex-1 min-h-0 h-full flex flex-col overflow-hidden">
+    <div className="flex-1 min-h-0 overflow-hidden">
       {activeTab === 'chat' && (
         <ChatPanel
           messages={messages}
@@ -586,7 +586,7 @@ export default function App() {
   );
 
   return (
-    <div className="h-screen h-[100dvh] w-screen w-full bg-neutral-950 text-neutral-100 flex flex-col font-sans antialiased overflow-hidden select-none">
+    <div className="h-screen w-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans antialiased overflow-hidden select-none">
       {/* 1. Header (Navbar): compact and responsive */}
       <Navbar
         roomId={roomId}
@@ -603,7 +603,7 @@ export default function App() {
         /* TABLET / MOBILE PORTRAIT: Fixed Header -> 16:9 Video across full width -> Tabs -> Full-height Chat without gaps */
         <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
           {/* Fixed 16:9 Video Player full width */}
-          <div className="w-full shrink-0 bg-black aspect-video max-h-[30vh] sm:max-h-[36vh] flex items-center justify-center">
+          <div className="w-full shrink-0 bg-black">
             <VideoPlayer
               currentTrack={currentTrack}
               playlist={roomState?.playlist || []}
@@ -638,7 +638,7 @@ export default function App() {
           </div>
 
           {/* Chat / Tab takes ALL remaining height without page scrolling */}
-          <div className="flex-1 min-h-0 p-1 md:p-1.5 flex flex-col overflow-hidden">
+          <div className="flex-1 min-h-0 p-1.5 flex flex-col overflow-hidden">
             {TabContent}
           </div>
         </main>
