@@ -1,0 +1,6 @@
+{
+  "name": "SyncWatch Party",
+  "description": "Синхронный просмотр видео с друзьями: WebSocket синхронизация таймкодов, умная буферизация, чат, плейлисты и HTTP 206 стриминг.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
