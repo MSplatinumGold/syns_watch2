@@ -45,6 +45,7 @@ export default function App() {
   const [initialUrlRoomId, setInitialUrlRoomId] = useState<string | undefined>(undefined);
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('landscape');
   const [isTablet, setIsTablet] = useState(false);
+  const [isTheaterMode, setIsTheaterMode] = useState(false);
 
   useEffect(() => {
     const handleLayoutCheck = () => {
@@ -452,6 +453,26 @@ export default function App() {
     [socketId]
   );
 
+  const handleAddDemo = useCallback(
+    async (sampleName: string, sampleUrl: string) => {
+      if (!isHost || !roomId) return;
+      try {
+        await fetch(`/api/rooms/${roomId}/add-sample`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-host-token': hostToken,
+            'x-socket-id': socketId,
+          },
+          body: JSON.stringify({ sampleName, sampleUrl }),
+        });
+      } catch (err) {
+        console.error('Failed to add sample:', err);
+      }
+    },
+    [isHost, roomId, hostToken, socketId]
+  );
+
   // Not in room -> Show Join/Create Modal
   if (!roomId || !nickname) {
     return (
@@ -606,6 +627,8 @@ export default function App() {
               onBufferingEnd={handleBufferingEnd}
               onTrackEnded={handleTrackEnded}
               onProgressReport={handleProgressReport}
+              onTriggerUpload={() => setActiveTab('playlist')}
+              onAddDemo={handleAddDemo}
             />
           </div>
 
@@ -620,43 +643,47 @@ export default function App() {
           </div>
         </main>
       ) : (
-        /* DESKTOP / TABLET LANDSCAPE: 2 Columns (Left: 16:9 Video Player, Right: Sidebar with Chat/Playlist/Users) */
-        <main className="flex-1 flex flex-row overflow-hidden p-2 md:p-3 gap-2 md:gap-3 max-w-[1720px] w-full mx-auto min-h-0">
-          {/* Left Column: Video Player */}
-          <section className="flex-1 flex flex-col justify-center min-w-0 h-full">
-            <div className="w-full flex-1 flex flex-col justify-center">
-              <VideoPlayer
-                currentTrack={currentTrack}
-                playlist={roomState?.playlist || []}
-                currentTrackIndex={roomState?.currentTrackIndex || 0}
-                isHost={isHost}
-                playbackState={
-                  roomState?.playbackState || {
-                    isPlaying: false,
-                    currentTime: 0,
-                    lastUpdatedServerTime: Date.now(),
-                    isSystemPausedForBuffering: false,
-                  }
+        /* DESKTOP / TABLET LANDSCAPE: Full-width responsive stage without artificial limits */
+        <main className="flex-1 flex flex-row overflow-hidden p-2 md:p-3 gap-3 w-full min-h-0">
+          {/* Left Column: Maximum 16:9 Cinema Stage */}
+          <section className="flex-1 min-w-0 h-full flex items-center justify-center overflow-hidden">
+            <VideoPlayer
+              currentTrack={currentTrack}
+              playlist={roomState?.playlist || []}
+              currentTrackIndex={roomState?.currentTrackIndex || 0}
+              isHost={isHost}
+              playbackState={
+                roomState?.playbackState || {
+                  isPlaying: false,
+                  currentTime: 0,
+                  lastUpdatedServerTime: Date.now(),
+                  isSystemPausedForBuffering: false,
                 }
-                bufferingUsers={bufferingUsers}
-                danmakuItems={danmakuItems}
-                onPlay={handlePlay}
-                onPause={handlePause}
-                onSeek={handleSeek}
-                onForcePlay={handleForcePlay}
-                onBufferingStart={handleBufferingStart}
-                onBufferingEnd={handleBufferingEnd}
-                onTrackEnded={handleTrackEnded}
-                onProgressReport={handleProgressReport}
-              />
-            </div>
+              }
+              bufferingUsers={bufferingUsers}
+              danmakuItems={danmakuItems}
+              isTheaterMode={isTheaterMode}
+              onPlay={handlePlay}
+              onPause={handlePause}
+              onSeek={handleSeek}
+              onForcePlay={handleForcePlay}
+              onBufferingStart={handleBufferingStart}
+              onBufferingEnd={handleBufferingEnd}
+              onTrackEnded={handleTrackEnded}
+              onProgressReport={handleProgressReport}
+              onTriggerUpload={() => setActiveTab('playlist')}
+              onAddDemo={handleAddDemo}
+              onToggleTheater={() => setIsTheaterMode((prev) => !prev)}
+            />
           </section>
 
-          {/* Right Column: Chat, Playlist, Participants */}
-          <aside className="w-[340px] md:w-[380px] xl:w-[420px] flex flex-col shrink-0 h-full min-h-0 gap-2">
-            {TabNavButtons}
-            {TabContent}
-          </aside>
+          {/* Right Column: Chat, Playlist, Participants (collapsible in theater mode) */}
+          {!isTheaterMode && (
+            <aside className="w-[340px] md:w-[380px] lg:w-[400px] xl:w-[440px] flex flex-col shrink-0 h-full min-h-0 gap-2 transition-all duration-300">
+              {TabNavButtons}
+              {TabContent}
+            </aside>
+          )}
         </main>
       )}
     </div>

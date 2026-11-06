@@ -15,6 +15,9 @@ import {
   AlertCircle,
   RotateCcw,
   Gauge,
+  UploadCloud,
+  PanelRightClose,
+  PanelRightOpen,
 } from 'lucide-react';
 import type { PlaylistItem, RoomPlaybackState, DanmakuItem } from '../types/watchparty.ts';
 import { formatTime, parseTime } from '../utils/format.ts';
@@ -28,6 +31,7 @@ interface VideoPlayerProps {
   playbackState: RoomPlaybackState;
   bufferingUsers: string[];
   danmakuItems: DanmakuItem[];
+  isTheaterMode?: boolean;
   onPlay: (currentTime: number) => void;
   onPause: (currentTime: number) => void;
   onSeek: (targetTime: number) => void;
@@ -36,6 +40,9 @@ interface VideoPlayerProps {
   onBufferingEnd: () => void;
   onTrackEnded: () => void;
   onProgressReport?: (currentTime: number) => void;
+  onTriggerUpload?: () => void;
+  onAddDemo?: (name: string, url: string) => void;
+  onToggleTheater?: () => void;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -46,6 +53,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   playbackState,
   bufferingUsers,
   danmakuItems,
+  isTheaterMode,
   onPlay,
   onPause,
   onSeek,
@@ -54,6 +62,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onBufferingEnd,
   onTrackEnded,
   onProgressReport,
+  onTriggerUpload,
+  onAddDemo,
+  onToggleTheater,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -83,6 +94,43 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [videoError, setVideoError] = useState<string | null>(null);
   const [scrubbingTime, setScrubbingTime] = useState<number | null>(null);
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [stageDimensions, setStageDimensions] = useState<{ width: number; height: number } | null>(null);
+
+  // Compute maximum 16:9 viewport fit to eliminate dead black space on large screens (WQHD/4K/PC)
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+
+    const updateSize = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const targetRatio = 16 / 9;
+        const currentRatio = rect.width / rect.height;
+        if (currentRatio > targetRatio) {
+          // Stage is wider than 16:9 -> player fills 100% of available height
+          const h = Math.floor(rect.height);
+          const w = Math.floor(h * targetRatio);
+          setStageDimensions({ width: w, height: h });
+        } else {
+          // Stage is narrower than 16:9 -> player fills 100% of available width
+          const w = Math.floor(rect.width);
+          const h = Math.floor(w / targetRatio);
+          setStageDimensions({ width: w, height: h });
+        }
+      }
+    };
+
+    updateSize();
+    const ro = new ResizeObserver(() => updateSize());
+    ro.observe(el);
+    window.addEventListener('resize', updateSize);
+
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', updateSize);
+    };
+  }, []);
 
   // Keep sync anchor updated when playbackState changes from server
   useEffect(() => {
@@ -489,10 +537,29 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   return (
     <div
-      ref={containerRef}
-      onMouseMove={handleMouseMove}
-      className="relative w-full aspect-video bg-neutral-950 rounded-2xl overflow-hidden shadow-2xl flex flex-col justify-center items-center select-none group border border-neutral-800"
+      ref={stageRef}
+      className="w-full h-full flex items-center justify-center overflow-hidden min-h-0 min-w-0"
     >
+      <div
+        ref={containerRef}
+        onMouseMove={handleMouseMove}
+        className="relative bg-neutral-950 rounded-2xl overflow-hidden shadow-2xl flex flex-col justify-center items-center select-none group border border-neutral-800 shrink-0 transition-[width,height] duration-150"
+        style={
+          isFullscreen
+            ? { width: '100vw', height: '100vh', borderRadius: 0 }
+            : stageDimensions
+            ? {
+                width: `${stageDimensions.width}px`,
+                height: `${stageDimensions.height}px`,
+                aspectRatio: '16/9',
+              }
+            : {
+                width: '100%',
+                maxHeight: '100%',
+                aspectRatio: '16/9',
+              }
+        }
+      >
       {/* Video Element or Empty State */}
       {videoSourceUrl ? (
         <video
@@ -515,18 +582,59 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           }}
         />
       ) : (
-        <div className="flex flex-col items-center justify-center p-8 text-center text-neutral-400 gap-3">
-          <div className="w-16 h-16 rounded-2xl bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-500 shadow-inner">
+        <div className="flex flex-col items-center justify-center p-6 md:p-10 text-center max-w-xl">
+          <div className="w-16 h-16 rounded-3xl bg-neutral-900 border border-neutral-800 flex items-center justify-center text-rose-500 shadow-xl mb-4">
             <Film className="w-8 h-8" />
           </div>
-          <div>
-            <h3 className="text-lg font-semibold text-neutral-200">Плейлист пуст</h3>
-            <p className="text-sm text-neutral-400 max-w-sm mt-1">
-              {isHost
-                ? 'Загрузите видеофайл в правом меню (Плейлист) или добавьте тестовое видео в 1 клик.'
-                : 'Ожидание, пока хост добавит видео в плейлист...'}
-            </p>
-          </div>
+          <h3 className="text-xl md:text-2xl font-bold text-white tracking-tight">Кинозал готов к просмотру</h3>
+          <p className="text-sm text-neutral-400 mt-1.5 mb-6 max-w-md">
+            {isHost
+              ? 'Загрузите свой фильм или запустите один из готовых тестовых клипов в 1 клик'
+              : 'Ожидание, пока хост запустит видеофайл или добавит фильм в плейлист...'}
+          </p>
+
+          {isHost && (
+            <div className="flex flex-wrap items-center justify-center gap-2.5 w-full">
+              {onTriggerUpload && (
+                <button
+                  onClick={onTriggerUpload}
+                  className="px-4 py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs md:text-sm font-semibold flex items-center gap-2 shadow-lg shadow-rose-600/30 transition transform active:scale-95 cursor-pointer"
+                >
+                  <UploadCloud className="w-4 h-4" />
+                  <span>Выбрать видеофайл</span>
+                </button>
+              )}
+
+              {onAddDemo && (
+                <>
+                  <button
+                    onClick={() =>
+                      onAddDemo(
+                        'Big Buck Bunny (HD Demo)',
+                        'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+                      )
+                    }
+                    className="px-4 py-2.5 bg-neutral-900 hover:bg-neutral-850 text-amber-300 border border-amber-500/30 hover:border-amber-500/60 rounded-xl text-xs md:text-sm font-semibold flex items-center gap-2 transition cursor-pointer"
+                  >
+                    <Sparkles className="w-4 h-4 text-amber-400" />
+                    <span>Демо: Big Buck Bunny</span>
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      onAddDemo(
+                        'Tears of Steel (Sci-Fi Demo)',
+                        'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4'
+                      )
+                    }
+                    className="px-3.5 py-2.5 bg-neutral-900 hover:bg-neutral-850 text-neutral-300 border border-neutral-700 hover:border-neutral-500 rounded-xl text-xs md:text-sm font-medium flex items-center gap-2 transition cursor-pointer"
+                  >
+                    <span>+ Tears of Steel</span>
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -795,6 +903,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </form>
             )}
 
+            {/* Theater Mode Toggle (Hide/Show sidebar on PC) */}
+            {onToggleTheater && (
+              <button
+                type="button"
+                onClick={onToggleTheater}
+                className="p-1.5 rounded-lg hover:bg-white/10 text-neutral-300 hover:text-white transition cursor-pointer hidden md:flex"
+                title={isTheaterMode ? 'Свернуть театр (показать панель)' : 'Широкий экран (скрыть панель)'}
+              >
+                {isTheaterMode ? (
+                  <PanelRightOpen className="w-4 h-4 text-amber-400" />
+                ) : (
+                  <PanelRightClose className="w-4 h-4" />
+                )}
+              </button>
+            )}
+
             {/* Fullscreen Toggle */}
             <button
               onClick={toggleFullscreen}
@@ -810,6 +934,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         </div>
       </div>
+    </div>
     </div>
   );
 };
