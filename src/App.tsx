@@ -601,7 +601,7 @@ export default function App() {
       {/* 2. Responsive Orientation Layout (Item 3) */}
       {isPortraitMode ? (
         /* TABLET / MOBILE PORTRAIT: Fixed Header -> 16:9 Video across full width -> Tabs -> Full-height Chat without gaps */
-        <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        <main className="flex-1 flex flex-col min-h-0 overflow-hidden pt-2">
           {/* Fixed 16:9 Video Player full width */}
           <div className="w-full shrink-0 bg-black">
             <VideoPlayer
@@ -643,8 +643,8 @@ export default function App() {
           </div>
         </main>
       ) : (
-        /* DESKTOP / TABLET LANDSCAPE: Full-width responsive stage without artificial limits */
-        <main className="flex-1 flex flex-row overflow-hidden p-2 md:p-3 gap-3 w-full min-h-0">
+        /* DESKTOP / TABLET LANDSCAPE: Full-width responsive stage with subtle top breathing room from navbar */
+        <main className="flex-1 flex flex-row overflow-hidden pt-3 md:pt-4 px-2 md:px-3 pb-2 md:pb-3 gap-3 w-full min-h-0">
           {/* Left Column: Maximum 16:9 Cinema Stage */}
           <section className="flex-1 min-w-0 h-full flex items-center justify-center overflow-hidden">
             <VideoPlayer

@@ -60,3 +60,30 @@ export function formatBytes(bytes: number, decimals = 1): string {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
+
+/**
+ * Formats transfer speed (e.g. 12.4 МБ/с)
+ */
+export function formatSpeed(bytesPerSec: number): string {
+  if (isNaN(bytesPerSec) || bytesPerSec <= 0) return '0 КБ/с';
+  if (bytesPerSec < 1024 * 1024) {
+    return `${(bytesPerSec / 1024).toFixed(1)} КБ/с`;
+  }
+  return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} МБ/с`;
+}
+
+/**
+ * Formats estimated time remaining (e.g. ~01:15 мин)
+ */
+export function formatEta(seconds: number): string {
+  if (isNaN(seconds) || seconds <= 0) return '~00:00';
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  if (mins >= 60) {
+    const hrs = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return `~${hrs} ч ${pad(remMins)} мин`;
+  }
+  return `~${pad(mins)}:${pad(secs)} мин`;
+}
