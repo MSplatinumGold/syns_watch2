@@ -75,12 +75,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   };
 
   return (
-    <div className="flex flex-col h-full bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-xl min-h-0">
+    <div className="flex flex-col h-full bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-xl">
       {/* Messages Feed */}
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-2.5 overscroll-contain"
+        className="flex-1 overflow-y-auto p-3.5 space-y-2.5 overscroll-contain"
       >
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-6 text-neutral-500">
@@ -136,7 +136,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       </div>
 
       {/* Quick Reaction Emoji Row */}
-      <div className="px-3 py-1.5 bg-neutral-950/80 border-t border-neutral-800/80 flex items-center justify-between gap-1 overflow-x-auto shrink-0">
+      <div className="px-3 py-1.5 bg-neutral-950/60 border-t border-neutral-800/80 flex items-center justify-between gap-1 overflow-x-auto">
         <span className="text-[10px] uppercase font-bold tracking-wider text-neutral-500 mr-1 select-none">
           Реакции
         </span>
@@ -154,8 +154,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         </div>
       </div>
 
-      {/* Input Box - strictly fixed in visible screen area */}
-      <div className="p-2.5 sm:p-3 pb-[max(0.625rem,calc(0.5rem+env(safe-area-inset-bottom)))] bg-neutral-950 border-t border-neutral-800 relative shrink-0 z-20">
+      {/* Input Box */}
+      <div className="p-3 bg-neutral-950/80 border-t border-neutral-800 relative">
         {/* Extended Emoji Picker Popup */}
         {showEmojiPicker && (
           <div className="absolute bottom-full mb-2 right-3 w-56 p-2 bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl grid grid-cols-6 gap-1 z-30">
