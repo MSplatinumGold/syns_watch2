@@ -1,8 +1,7 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   UploadCloud,
   Play,
-  Pause,
   Trash2,
   ChevronUp,
   ChevronDown,
@@ -12,12 +11,9 @@ import {
   Loader2,
   CheckCircle2,
   X,
-  Zap,
-  Clock,
-  RotateCcw,
 } from 'lucide-react';
 import type { PlaylistItem } from '../types/watchparty.ts';
-import { formatBytes, formatSpeed, formatEta } from '../utils/format.ts';
+import { formatBytes } from '../utils/format.ts';
 
 interface PlaylistPanelProps {
   playlist: PlaylistItem[];
@@ -31,21 +27,6 @@ interface PlaylistPanelProps {
   onDeleteTrack: (fileId: string) => void;
 }
 
-interface UploadTask {
-  file: File;
-  fileId: string;
-  bytesUploaded: number;
-  totalBytes: number;
-  speedBps: number;
-  etaSeconds: number;
-  isPaused: boolean;
-  statusText: string;
-  retryCount: number;
-  error: string | null;
-}
-
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB chunks
-
 export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   playlist,
   currentTrackIndex,
@@ -58,232 +39,35 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   onDeleteTrack,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const isPausedRef = useRef<boolean>(false);
-  const isCancelledRef = useRef<boolean>(false);
-  const activeUploadRef = useRef<UploadTask | null>(null);
-
-  const [uploadTask, setUploadTask] = useState<UploadTask | null>(null);
+  const xhrRef = useRef<XMLHttpRequest | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [codecWarning, setCodecWarning] = useState<string | null>(null);
   const [isAddingSample, setIsAddingSample] = useState(false);
 
-  // Sync ref with state
-  useEffect(() => {
-    activeUploadRef.current = uploadTask;
-  }, [uploadTask]);
-
-  // Main chunk upload loop with auto-retry and pause/resume support
-  const runChunkUploadLoop = async (task: UploadTask, startFromByte: number) => {
-    const { file, fileId, totalBytes } = task;
-    let offset = startFromByte;
-    let lastSpeed = task.speedBps || 0;
-
-    isPausedRef.current = false;
-    isCancelledRef.current = false;
-
-    while (offset < totalBytes) {
-      if (isPausedRef.current || isCancelledRef.current) {
-        return;
-      }
-
-      const chunkEnd = Math.min(offset + CHUNK_SIZE, totalBytes);
-      const chunkBlob = file.slice(offset, chunkEnd);
-      const chunkIndex = Math.floor(offset / CHUNK_SIZE);
-      const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
-      const chunkSize = chunkEnd - offset;
-
-      let chunkSuccess = false;
-      let attempt = 0;
-
-      while (attempt < 3 && !chunkSuccess) {
-        if (isPausedRef.current || isCancelledRef.current) {
-          return;
-        }
-
-        attempt++;
-        if (attempt > 1) {
-          setUploadTask((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  retryCount: attempt - 1,
-                  statusText: `Повтор попытки связи (${attempt - 1}/3)...`,
-                }
-              : null
-          );
-          // Exponential backoff: 1s, 2s, 3s
-          await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
-          if (isPausedRef.current || isCancelledRef.current) return;
-        }
-
-        const controller = new AbortController();
-        abortControllerRef.current = controller;
-        const chunkStartTime = Date.now();
-
-        try {
-          const response = await fetch(`/api/rooms/${roomId}/upload/chunk`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/octet-stream',
-              'x-host-token': hostToken,
-              'x-socket-id': socketId,
-              'x-file-id': fileId,
-              'x-file-name': encodeURIComponent(file.name),
-              'x-file-size': totalBytes.toString(),
-              'x-chunk-offset': offset.toString(),
-              'x-chunk-index': chunkIndex.toString(),
-              'x-total-chunks': totalChunks.toString(),
-              'x-chunk-size': chunkSize.toString(),
-            },
-            body: chunkBlob,
-            signal: controller.signal,
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-
-          const data = await response.json();
-          chunkSuccess = true;
-
-          const durationSec = Math.max(0.05, (Date.now() - chunkStartTime) / 1000);
-          const currentSpeed = chunkSize / durationSec;
-          lastSpeed = lastSpeed > 0 ? lastSpeed * 0.7 + currentSpeed * 0.3 : currentSpeed;
-
-          offset = chunkEnd;
-          const remainingBytes = Math.max(0, totalBytes - offset);
-          const eta = lastSpeed > 0 ? Math.round(remainingBytes / lastSpeed) : 0;
-
-          setUploadTask((prev) => {
-            if (!prev) return null;
-            return {
-              ...prev,
-              bytesUploaded: offset,
-              speedBps: lastSpeed,
-              etaSeconds: eta,
-              retryCount: 0,
-              error: null,
-              statusText: data.isCompleted ? 'Готово!' : 'Загрузка чанками (5 МБ)...',
-            };
-          });
-
-          if (data.isCompleted) {
-            // Upload complete: clear card after brief success confirmation
-            setTimeout(() => {
-              setUploadTask(null);
-              if (fileInputRef.current) fileInputRef.current.value = '';
-            }, 1200);
-            return;
-          }
-        } catch (err: any) {
-          if (controller.signal.aborted) {
-            return; // Normal pause or cancellation
-          }
-          console.warn(`Chunk ${chunkIndex} attempt ${attempt} failed:`, err);
-          if (attempt >= 3) {
-            setUploadTask((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    error: 'Сбой сети после 3 попыток. Нажмите «Продолжить» для повтора.',
-                    isPaused: true,
-                    statusText: 'Ошибка связи',
-                  }
-                : null
-            );
-            return;
-          }
-        }
-      }
+  // Cancel in-flight upload
+  const handleCancelUpload = () => {
+    if (xhrRef.current) {
+      xhrRef.current.abort();
+      xhrRef.current = null;
     }
-  };
-
-  // Pause Upload
-  const handlePauseUpload = () => {
-    isPausedRef.current = true;
-    abortControllerRef.current?.abort();
-    setUploadTask((prev) =>
-      prev
-        ? {
-            ...prev,
-            isPaused: true,
-            speedBps: 0,
-            etaSeconds: 0,
-            statusText: 'Загрузка приостановлена',
-          }
-        : null
-    );
-  };
-
-  // Resume Upload
-  const handleResumeUpload = async () => {
-    if (!uploadTask) return;
-    const task = uploadTask;
-    isPausedRef.current = false;
-    isCancelledRef.current = false;
-
-    setUploadTask((prev) =>
-      prev
-        ? {
-            ...prev,
-            isPaused: false,
-            error: null,
-            statusText: 'Сверка прогресса с сервером...',
-          }
-        : null
-    );
-
-    try {
-      const res = await fetch(`/api/rooms/${roomId}/upload/status/${task.fileId}`);
-      if (res.ok) {
-        const statusData = await res.json();
-        const serverBytes = statusData.bytesUploaded || 0;
-        setUploadTask((prev) =>
-          prev
-            ? {
-                ...prev,
-                bytesUploaded: serverBytes,
-                statusText: 'Возобновление загрузки...',
-              }
-            : null
-        );
-        runChunkUploadLoop(task, serverBytes);
-      } else {
-        runChunkUploadLoop(task, task.bytesUploaded);
-      }
-    } catch {
-      runChunkUploadLoop(task, task.bytesUploaded);
-    }
-  };
-
-  // Cancel Upload and purge .part file from server disk
-  const handleCancelUpload = async () => {
-    isCancelledRef.current = true;
-    abortControllerRef.current?.abort();
-    const fileId = uploadTask?.fileId;
-
-    setUploadTask(null);
+    setIsUploading(false);
+    setUploadProgress(0);
     if (fileInputRef.current) fileInputRef.current.value = '';
-
-    if (fileId) {
-      try {
-        await fetch(`/api/rooms/${roomId}/upload/cancel/${fileId}`, {
-          method: 'POST',
-        });
-      } catch (e) {
-        console.error('Failed to cancel upload on server:', e);
-      }
-    }
   };
 
-  // File Upload Handler (initiates 5MB Resumable Chunked Upload)
+  // File Upload Handler with XMLHttpRequest for real progress bar
   const handleFiles = (files: FileList | null) => {
     if (!files || files.length === 0 || !isHost) return;
-    const file = files[0];
 
     // Check for mkv/avi warnings
-    const ext = file.name.split('.').pop()?.toLowerCase();
-    const hasCodecWarn = ext === 'mkv' || ext === 'avi' || ext === 'wmv';
+    let hasCodecWarn = false;
+    for (let i = 0; i < files.length; i++) {
+      const ext = files[i].name.split('.').pop()?.toLowerCase();
+      if (ext === 'mkv' || ext === 'avi' || ext === 'wmv') {
+        hasCodecWarn = true;
+      }
+    }
 
     if (hasCodecWarn) {
       setCodecWarning(
@@ -293,22 +77,56 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       setCodecWarning(null);
     }
 
-    const fileId = 'vid_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
-    const newTask: UploadTask = {
-      file,
-      fileId,
-      bytesUploaded: 0,
-      totalBytes: file.size,
-      speedBps: 0,
-      etaSeconds: 0,
-      isPaused: false,
-      statusText: 'Инициализация чанковой загрузки (5 МБ)...',
-      retryCount: 0,
-      error: null,
+    const formData = new FormData();
+    for (let i = 0; i < files.length; i++) {
+      formData.append('videos', files[i]);
+    }
+    formData.append('token', hostToken);
+    formData.append('socketId', socketId);
+
+    setIsUploading(true);
+    setUploadProgress(0);
+
+    const xhr = new XMLHttpRequest();
+    xhrRef.current = xhr;
+    xhr.open('POST', `/api/rooms/${roomId}/upload`);
+    xhr.setRequestHeader('x-host-token', hostToken);
+    xhr.setRequestHeader('x-socket-id', socketId);
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        const percent = Math.round((event.loaded / event.total) * 100);
+        setUploadProgress(percent);
+      }
     };
 
-    setUploadTask(newTask);
-    runChunkUploadLoop(newTask, 0);
+    xhr.onload = () => {
+      setIsUploading(false);
+      setUploadProgress(0);
+      xhrRef.current = null;
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (xhr.status >= 200 && xhr.status < 300) {
+        // Successful upload, socket event will update playlist
+      } else {
+        alert('Ошибка при загрузке: ' + xhr.responseText);
+      }
+    };
+
+    xhr.onabort = () => {
+      setIsUploading(false);
+      setUploadProgress(0);
+      xhrRef.current = null;
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    xhr.onerror = () => {
+      setIsUploading(false);
+      setUploadProgress(0);
+      xhrRef.current = null;
+      alert('Сетевая ошибка при загрузке файла');
+    };
+
+    xhr.send(formData);
   };
 
   // Add instant demo sample
@@ -355,10 +173,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     onReorder(newItems.map((i) => i.id));
   };
 
-  const uploadPercent = uploadTask
-    ? Math.min(100, Math.round((uploadTask.bytesUploaded / (uploadTask.totalBytes || 1)) * 100))
-    : 0;
-
   return (
     <div className="flex flex-col h-full bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-xl">
       {/* Header */}
@@ -374,7 +188,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         {isHost && (
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={Boolean(uploadTask)}
+            disabled={isUploading}
             className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow disabled:opacity-50 cursor-pointer"
           >
             <UploadCloud className="w-3.5 h-3.5" />
@@ -386,6 +200,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         accept="video/*,.mp4,.webm,.ogg,.mov,.mkv,.avi"
         onChange={(e) => handleFiles(e.target.files)}
         className="hidden"
@@ -407,110 +222,33 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         </div>
       )}
 
-      {/* Resumable Chunked Upload Informative Card */}
-      {uploadTask && (
-        <div className="p-3 bg-neutral-950/95 border-b border-neutral-800 space-y-2.5 shadow-inner">
-          {/* Top Row: File Name, Size progress, and Percentage */}
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <div className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-rose-500 shrink-0">
-                <Film className="w-4 h-4" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div
-                  className="text-xs font-semibold text-neutral-200 truncate"
-                  title={uploadTask.file.name}
-                >
-                  {uploadTask.file.name}
-                </div>
-                <div className="text-[11px] text-neutral-400 font-mono">
-                  {formatBytes(uploadTask.bytesUploaded)} / {formatBytes(uploadTask.totalBytes)}
-                </div>
-              </div>
-            </div>
-            <div className="text-right shrink-0">
-              <span className="font-mono font-bold text-sm text-rose-400">
-                {uploadPercent}%
-              </span>
-            </div>
-          </div>
-
-          {/* Progress Bar */}
-          <div className="w-full h-2 bg-neutral-800 rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all duration-200 ${
-                uploadTask.isPaused
-                  ? 'bg-amber-500'
-                  : 'bg-gradient-to-r from-rose-600 via-amber-500 to-emerald-400'
-              }`}
-              style={{ width: `${uploadPercent}%` }}
-            />
-          </div>
-
-          {/* Metrics & Actions Row: Speed, ETA, Status, Buttons */}
-          <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">
-            <div className="flex items-center gap-1.5 text-[11px]">
-              {/* Speed Badge */}
-              <span className="px-2 py-0.5 rounded bg-neutral-900 border border-neutral-800 text-amber-300 font-mono flex items-center gap-1">
-                <Zap className="w-3 h-3 text-amber-400" />
-                {uploadTask.isPaused ? '0 КБ/с' : formatSpeed(uploadTask.speedBps)}
-              </span>
-
-              {/* ETA Badge */}
-              <span className="px-2 py-0.5 rounded bg-neutral-900 border border-neutral-800 text-neutral-300 font-mono flex items-center gap-1">
-                <Clock className="w-3 h-3 text-neutral-400" />
-                {uploadTask.isPaused ? 'Пауза' : formatEta(uploadTask.etaSeconds)}
-              </span>
-
-              {/* Status text */}
-              <span className="text-neutral-400 text-[11px] truncate max-w-[120px] hidden sm:inline">
-                {uploadTask.statusText}
-              </span>
-            </div>
-
-            {/* Action Buttons: Pause / Resume & Cancel */}
-            <div className="flex items-center gap-1.5 ml-auto">
-              <button
-                type="button"
-                onClick={uploadTask.isPaused ? handleResumeUpload : handlePauseUpload}
-                className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow cursor-pointer ${
-                  uploadTask.isPaused
-                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                    : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700'
-                }`}
-                title={uploadTask.isPaused ? 'Продолжить загрузку' : 'Приостановить загрузку'}
-              >
-                {uploadTask.isPaused ? (
-                  <>
-                    <Play className="w-3 h-3 text-emerald-200 fill-emerald-200" />
-                    <span>Продолжить</span>
-                  </>
-                ) : (
-                  <>
-                    <Pause className="w-3 h-3 text-amber-300 fill-amber-300" />
-                    <span>Пауза</span>
-                  </>
-                )}
-              </button>
-
+      {/* Upload Progress Bar */}
+      {isUploading && (
+        <div className="p-3 bg-neutral-950/80 border-b border-neutral-800">
+          <div className="flex items-center justify-between text-xs text-neutral-300 mb-1.5">
+            <span className="flex items-center gap-1.5">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-500" />
+              Загрузка на сервер...
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="font-mono font-semibold text-rose-400">{uploadProgress}%</span>
               <button
                 type="button"
                 onClick={handleCancelUpload}
-                className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-rose-950/60 text-neutral-300 hover:text-rose-200 text-xs font-medium border border-neutral-700 hover:border-rose-800/80 transition flex items-center gap-1 cursor-pointer"
-                title="Отменить загрузку и удалить временный файл"
+                className="px-2 py-0.5 rounded bg-neutral-800 hover:bg-rose-900/60 text-neutral-300 hover:text-rose-200 text-[11px] font-medium border border-neutral-700 transition flex items-center gap-1 cursor-pointer"
+                title="Отменить загрузку файла"
               >
                 <X className="w-3 h-3 text-rose-400" />
-                <span>Отмена</span>
+                <span>Отменить</span>
               </button>
             </div>
           </div>
-
-          {/* Error notification if retries failed */}
-          {uploadTask.error && (
-            <div className="text-[11px] text-rose-400 bg-rose-950/40 border border-rose-900/60 p-1.5 rounded-lg">
-              {uploadTask.error}
-            </div>
-          )}
+          <div className="w-full h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-rose-600 to-amber-500 rounded-full transition-all duration-150"
+              style={{ width: `${uploadProgress}%` }}
+            />
+          </div>
         </div>
       )}
 

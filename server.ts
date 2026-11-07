@@ -255,210 +255,7 @@ app.post('/api/rooms/:roomId/add-sample', (req, res) => {
   res.json({ success: true, item, playlist: room.playlist });
 });
 
-// -----------------------------------------------------------------------------
-// Resumable Chunked Upload (Zero-Copy Disk I/O, 5MB Slices, Pause/Resume)
-// -----------------------------------------------------------------------------
-
-// Check chunked upload status to resume exactly where left off
-app.get('/api/rooms/:roomId/upload/status/:fileId', (req, res) => {
-  const { roomId, fileId } = req.params;
-  const room = rooms.get(roomId);
-  if (!room) {
-    res.status(404).json({ error: 'Комната не найдена' });
-    return;
-  }
-
-  const roomDir = getRoomStorageDir(roomId);
-  const partPath = path.join(roomDir, `${fileId}.part`);
-
-  // Check if file is already completed in playlist
-  const existingInPlaylist = room.playlist.find((item) => item.id === fileId);
-  if (existingInPlaylist) {
-    res.json({
-      bytesUploaded: existingInPlaylist.size,
-      totalBytes: existingInPlaylist.size,
-      isCompleted: true,
-    });
-    return;
-  }
-
-  // Check if .part file exists on disk
-  if (fs.existsSync(partPath)) {
-    try {
-      const stat = fs.statSync(partPath);
-      res.json({
-        bytesUploaded: stat.size,
-        isCompleted: false,
-      });
-    } catch {
-      res.json({ bytesUploaded: 0, isCompleted: false });
-    }
-  } else {
-    res.json({
-      bytesUploaded: 0,
-      isCompleted: false,
-    });
-  }
-});
-
-// Cancel chunked upload and immediately delete .part temporary file
-app.post('/api/rooms/:roomId/upload/cancel/:fileId', (req, res) => {
-  const { roomId, fileId } = req.params;
-  const room = rooms.get(roomId);
-  if (!room) {
-    res.status(404).json({ error: 'Комната не найдена' });
-    return;
-  }
-
-  const roomDir = getRoomStorageDir(roomId);
-  const partPath = path.join(roomDir, `${fileId}.part`);
-  if (fs.existsSync(partPath)) {
-    try {
-      fs.unlinkSync(partPath);
-    } catch (e) {
-      console.error('Failed to unlink part file:', e);
-    }
-  }
-
-  res.json({ success: true, message: 'Временный файл .part удален с диска' });
-});
-
-// Upload chunk: raw streaming directly to disk offset without keeping in Node.js RAM
-app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
-  const { roomId } = req.params;
-  const room = rooms.get(roomId);
-
-  if (!room) {
-    res.status(404).json({ error: 'Комната не найдена' });
-    return;
-  }
-
-  const token = req.headers['x-host-token'] || req.query.token;
-  const socketId = req.headers['x-socket-id'] || req.query.socketId;
-
-  // Verify host permissions
-  const isAuthorized =
-    (token && token === room.hostToken) ||
-    (socketId && socketId === room.hostId) ||
-    Object.keys(room.users).length === 0;
-
-  if (!isAuthorized) {
-    res.status(403).json({ error: 'Только хост может загружать видео' });
-    return;
-  }
-
-  const fileId = (req.headers['x-file-id'] as string) || '';
-  const rawFileName = (req.headers['x-file-name'] as string) || 'video.mp4';
-  const fileName = decodeURIComponent(rawFileName);
-  const totalSize = parseInt((req.headers['x-file-size'] as string) || '0', 10);
-  const offset = parseInt((req.headers['x-chunk-offset'] as string) || '0', 10);
-  const chunkIndex = parseInt((req.headers['x-chunk-index'] as string) || '0', 10);
-  const totalChunks = parseInt((req.headers['x-total-chunks'] as string) || '1', 10);
-
-  if (!fileId || isNaN(totalSize) || totalSize <= 0 || isNaN(offset)) {
-    res.status(400).json({ error: 'Некорректные параметры чанка' });
-    return;
-  }
-
-  const roomDir = getRoomStorageDir(roomId);
-  const partPath = path.join(roomDir, `${fileId}.part`);
-
-  const fileExists = fs.existsSync(partPath);
-  const flags = offset === 0 ? 'w' : fileExists ? 'r+' : 'w';
-
-  // Zero-Copy Disk I/O: stream network TCP chunk directly to disk descriptor at byte offset
-  const writeStream = fs.createWriteStream(partPath, {
-    flags,
-    start: offset,
-  });
-
-  req.on('close', () => {
-    if (!writeStream.writableEnded) {
-      writeStream.destroy();
-    }
-  });
-
-  writeStream.on('error', (err) => {
-    console.error('Error writing chunk to part file:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Ошибка записи чанка на диск' });
-    }
-  });
-
-  writeStream.on('finish', () => {
-    try {
-      const stat = fs.statSync(partPath);
-      const currentBytes = stat.size;
-      const isCompleted = chunkIndex >= totalChunks - 1 || currentBytes >= totalSize;
-
-      if (isCompleted) {
-        // Atomic rename of completed .part file to permanent file
-        const ext = path.extname(fileName).toLowerCase() || '.mp4';
-        const finalFilename = `${fileId}${ext}`;
-        const finalPath = path.join(roomDir, finalFilename);
-
-        if (fs.existsSync(finalPath)) {
-          fs.unlinkSync(finalPath);
-        }
-        fs.renameSync(partPath, finalPath);
-
-        let mimeType = 'video/mp4';
-        if (ext === '.webm') mimeType = 'video/webm';
-        else if (ext === '.ogg') mimeType = 'video/ogg';
-        else if (ext === '.mov') mimeType = 'video/quicktime';
-
-        const item: PlaylistItem = {
-          id: fileId,
-          originalName: fileName,
-          filename: finalFilename,
-          size: stat.size,
-          mimeType,
-          url: `/api/rooms/${roomId}/stream/${finalFilename}`,
-        };
-
-        room.playlist.push(item);
-
-        io.to(roomId).emit('playlist:updated', {
-          playlist: room.playlist,
-          currentTrackIndex: room.currentTrackIndex,
-        });
-
-        io.to(roomId).emit('chat:message', {
-          id: uuidv4(),
-          userId: 'system',
-          nickname: 'Система',
-          text: `Загружен видеофайл: "${fileName}" (${(stat.size / (1024 * 1024)).toFixed(1)} МБ)`,
-          timestamp: Date.now(),
-          type: 'system',
-        });
-
-        res.json({
-          success: true,
-          isCompleted: true,
-          bytesUploaded: stat.size,
-          item,
-          playlist: room.playlist,
-        });
-      } else {
-        res.json({
-          success: true,
-          isCompleted: false,
-          bytesUploaded: currentBytes,
-          chunkIndex,
-        });
-      }
-    } catch (e) {
-      console.error('Error finalizing chunk upload:', e);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Ошибка финализации чанка' });
-      }
-    }
-  });
-
-  req.pipe(writeStream);
-});
-
-// Stream video via HTTP 206 Partial Content (Optimized 128KB buffer with leak-proof cleanup)
+// Stream video via HTTP 206 Partial Content
 app.get('/api/rooms/:roomId/stream/:fileId', (req, res) => {
   const { roomId, fileId } = req.params;
   const roomDir = path.join(STORAGE_BASE_DIR, roomId);
@@ -500,16 +297,10 @@ app.get('/api/rooms/:roomId/stream/:fileId', (req, res) => {
     }
 
     const chunksize = end - start + 1;
-    // Optimized 128 KB buffer to eliminate RAM spikes for multiple viewers
     const fileStream = fs.createReadStream(filePath, {
       start,
       end,
-      highWaterMark: 128 * 1024,
-    });
-
-    // Immediate resource cleanup hook: on seek or disconnect destroy stream to prevent fd/RAM leaks
-    req.on('close', () => {
-      fileStream.destroy();
+      highWaterMark: 2 * 1024 * 1024, // 2MB read chunks for high-speed prebuffering
     });
 
     res.writeHead(206, {
@@ -530,11 +321,7 @@ app.get('/api/rooms/:roomId/stream/:fileId', (req, res) => {
       'Cache-Control': 'public, max-age=86400, no-transform',
     });
 
-    const fileStream = fs.createReadStream(filePath, { highWaterMark: 128 * 1024 });
-    req.on('close', () => {
-      fileStream.destroy();
-    });
-    fileStream.pipe(res);
+    fs.createReadStream(filePath, { highWaterMark: 2 * 1024 * 1024 }).pipe(res);
   }
 });
 
