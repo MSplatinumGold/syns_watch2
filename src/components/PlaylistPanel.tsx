@@ -75,6 +75,11 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   const [codecWarning, setCodecWarning] = useState<string | null>(null);
   const [isAddingSample, setIsAddingSample] = useState(false);
 
+  const speedTrackerRef = useRef<{ lastTime: number; lastTotalBytes: number }>({
+    lastTime: Date.now(),
+    lastTotalBytes: 0,
+  });
+
   // Upload a single 5MB chunk with real-time byte progress
   const uploadChunkWithProgress = useCallback(
     (
@@ -101,14 +106,11 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         xhr.setRequestHeader('x-chunk-index', chunkIndex.toString());
         xhr.setRequestHeader('x-total-chunks', totalChunks.toString());
 
-        let lastProgressTime = Date.now();
-        let lastProgressLoaded = 0;
-
         xhr.upload.onprogress = (e) => {
           if (isPausedRef.current || isCancelledRef.current) return;
           chunkLoadedMapRef.current.set(chunkIndex, e.loaded);
 
-          // Aggregate uploaded bytes across all completed and concurrent chunks
+          // Aggregate uploaded bytes across all completed and concurrent in-flight chunks
           const completedBytes = completedChunksSetRef.current.size * CHUNK_SIZE;
           let inFlightBytes = 0;
           chunkLoadedMapRef.current.forEach((bytes) => {
@@ -117,20 +119,19 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           const totalUploadedSoFar = Math.min(completedBytes + inFlightBytes, file.size);
 
           const now = Date.now();
-          const dt = (now - lastProgressTime) / 1000;
+          const dt = (now - speedTrackerRef.current.lastTime) / 1000;
           if (dt >= 0.25) {
-            const dLoaded = e.loaded - lastProgressLoaded;
-            const instantSpeed = dLoaded / dt;
-            lastProgressTime = now;
-            lastProgressLoaded = e.loaded;
+            const dLoaded = totalUploadedSoFar - speedTrackerRef.current.lastTotalBytes;
+            speedTrackerRef.current.lastTime = now;
+            speedTrackerRef.current.lastTotalBytes = totalUploadedSoFar;
 
-            const speed = instantSpeed > 0 ? instantSpeed : 0;
+            const instantSpeed = dLoaded > 0 && dt > 0 ? dLoaded / dt : 0;
             const remainingBytes = Math.max(0, file.size - totalUploadedSoFar);
 
             setUpload((prev) => {
               if (!prev || prev.status !== 'uploading') return prev;
               const smoothedSpeed =
-                prev.speed > 0 ? prev.speed * 0.7 + speed * 0.3 : speed;
+                prev.speed > 0 ? prev.speed * 0.65 + instantSpeed * 0.35 : instantSpeed;
               const remainingSec =
                 smoothedSpeed > 0 ? Math.ceil(remainingBytes / smoothedSpeed) : 0;
               return {
@@ -295,6 +296,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     isCancelledRef.current = false;
     completedChunksSetRef.current.clear();
     chunkLoadedMapRef.current.clear();
+    speedTrackerRef.current = { lastTime: Date.now(), lastTotalBytes: 0 };
 
     setUpload({
       file,
@@ -369,6 +371,11 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         pendingChunks.push(i);
       }
     }
+
+    speedTrackerRef.current = {
+      lastTime: Date.now(),
+      lastTotalBytes: completedChunksSetRef.current.size * CHUNK_SIZE,
+    };
 
     uploadChunkLoop(upload.file, upload.fileId, pendingChunks);
   };
