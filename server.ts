@@ -202,7 +202,17 @@ app.post('/api/rooms/:roomId/upload', upload.array('videos', 10), (req, res) => 
   });
 });
 
-// Check upload status of a file for resumable chunked upload
+interface ChunkUploadSession {
+  fileId: string;
+  totalChunks: number;
+  totalSize: number;
+  fileName: string;
+  completedChunks: Set<number>;
+}
+
+const uploadSessions = new Map<string, ChunkUploadSession>();
+
+// Check upload status of a file for resumable concurrent chunked upload
 app.get('/api/rooms/:roomId/upload/status/:fileId', (req, res) => {
   const { roomId, fileId } = req.params;
   const room = rooms.get(roomId);
@@ -215,22 +225,36 @@ app.get('/api/rooms/:roomId/upload/status/:fileId', (req, res) => {
   const partPath = path.join(roomDir, `${fileId}.part`);
   const metaPath = path.join(roomDir, `${fileId}.info`);
 
-  // Check if in-progress .part file exists
+  // Check active in-memory session
+  const session = uploadSessions.get(fileId);
+  if (session && fs.existsSync(partPath)) {
+    res.json({
+      exists: true,
+      completed: false,
+      completedChunks: Array.from(session.completedChunks),
+      totalChunks: session.totalChunks,
+    });
+    return;
+  }
+
+  // Check if .part exists with persisted .info on disk
   if (fs.existsSync(partPath)) {
-    const stat = fs.statSync(partPath);
-    let verifiedBytes = stat.size;
+    let completedChunks: number[] = [];
+    let totalChunks = 0;
     if (fs.existsSync(metaPath)) {
       try {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        if (typeof meta.verifiedBytes === 'number') {
-          verifiedBytes = meta.verifiedBytes;
+        if (Array.isArray(meta.completedChunks)) {
+          completedChunks = meta.completedChunks;
         }
+        totalChunks = meta.totalChunks || 0;
       } catch {}
     }
     res.json({
       exists: true,
       completed: false,
-      uploadedBytes: verifiedBytes,
+      completedChunks,
+      totalChunks,
     });
     return;
   }
@@ -265,11 +289,12 @@ app.get('/api/rooms/:roomId/upload/status/:fileId', (req, res) => {
   res.json({
     exists: false,
     completed: false,
-    uploadedBytes: 0,
+    completedChunks: [],
+    totalChunks: 0,
   });
 });
 
-// Resumable Chunked Upload (5MB slices with Zero-Copy streaming disk I/O, near-zero RAM footprint)
+// Resumable Concurrent Chunked Upload (5MB slices with Zero-Copy streaming disk I/O, near-zero RAM footprint)
 app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
   const { roomId } = req.params;
   const room = rooms.get(roomId);
@@ -308,10 +333,38 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
   const partPath = path.join(roomDir, `${fileId}.part`);
   const metaPath = path.join(roomDir, `${fileId}.info`);
 
-  const fileExists = fs.existsSync(partPath);
-  // Direct file stream write at chunk offset: zero memory accumulation in Node.js heap
+  // Ensure file exists on disk so concurrent chunk writes can open with 'r+' safely
+  if (!fs.existsSync(partPath)) {
+    try {
+      const fd = fs.openSync(partPath, 'w');
+      fs.closeSync(fd);
+    } catch {}
+  }
+
+  // Get or initialize active session
+  let session = uploadSessions.get(fileId);
+  if (!session) {
+    session = {
+      fileId,
+      totalChunks,
+      totalSize,
+      fileName,
+      completedChunks: new Set<number>(),
+    };
+    if (fs.existsSync(metaPath)) {
+      try {
+        const savedMeta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        if (Array.isArray(savedMeta.completedChunks)) {
+          savedMeta.completedChunks.forEach((c: number) => session!.completedChunks.add(c));
+        }
+      } catch {}
+    }
+    uploadSessions.set(fileId, session);
+  }
+
+  // Open writeStream directly at chunk offset with zero Node.js userland buffering
   const writeStream = fs.createWriteStream(partPath, {
-    flags: !fileExists || chunkOffset === 0 ? 'w' : 'r+',
+    flags: 'r+',
     start: chunkOffset,
   });
 
@@ -339,9 +392,9 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
 
   writeStream.on('finish', () => {
     try {
-      const verifiedBytes = chunkOffset + bytesReceivedThisChunk;
+      session!.completedChunks.add(chunkIndex);
 
-      // Update meta info for resumable state tracking
+      // Persist completed chunks list for resume support
       try {
         fs.writeFileSync(
           metaPath,
@@ -349,18 +402,17 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
             fileId,
             fileName,
             totalSize,
-            verifiedBytes,
-            lastChunkIndex: chunkIndex,
             totalChunks,
+            completedChunks: Array.from(session!.completedChunks),
             updatedAt: Date.now(),
           })
         );
       } catch {}
 
-      const isLast = chunkIndex >= totalChunks - 1 || (totalSize > 0 && verifiedBytes >= totalSize);
+      // Finalize ONLY when every single chunk has completed
+      const isAllCompleted = session!.completedChunks.size === totalChunks;
 
-      if (isLast) {
-        // Truncate to exact total size if needed
+      if (isAllCompleted) {
         if (totalSize > 0) {
           try {
             fs.truncateSync(partPath, totalSize);
@@ -379,6 +431,7 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
             fs.unlinkSync(metaPath);
           } catch {}
         }
+        uploadSessions.delete(fileId);
 
         const finalStat = fs.statSync(finalPath);
         const item: PlaylistItem = {
@@ -412,6 +465,7 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
           completed: true,
           uploadedBytes: item.size,
           chunkIndex,
+          completedCount: session!.completedChunks.size,
           totalChunks,
           item,
           playlist: room.playlist,
@@ -420,8 +474,8 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
         res.json({
           success: true,
           completed: false,
-          uploadedBytes: verifiedBytes,
           chunkIndex,
+          completedCount: session!.completedChunks.size,
           totalChunks,
         });
       }
@@ -455,6 +509,8 @@ app.post('/api/rooms/:roomId/upload/cancel/:fileId', (req, res) => {
     res.status(403).json({ error: 'Только хост может отменять загрузку' });
     return;
   }
+
+  uploadSessions.delete(fileId);
 
   const roomDir = getRoomStorageDir(roomId);
   const partPath = path.join(roomDir, `${fileId}.part`);

@@ -65,7 +65,9 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   onDeleteTrack,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const activeXhrRef = useRef<XMLHttpRequest | null>(null);
+  const activeXhrsRef = useRef<Set<XMLHttpRequest>>(new Set());
+  const chunkLoadedMapRef = useRef<Map<number, number>>(new Map());
+  const completedChunksSetRef = useRef<Set<number>>(new Set());
   const isPausedRef = useRef(false);
   const isCancelledRef = useRef(false);
 
@@ -86,7 +88,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     ): Promise<void> => {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        activeXhrRef.current = xhr;
+        activeXhrsRef.current.add(xhr);
 
         xhr.open('POST', `/api/rooms/${roomId}/upload/chunk`);
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
@@ -104,16 +106,23 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
 
         xhr.upload.onprogress = (e) => {
           if (isPausedRef.current || isCancelledRef.current) return;
-          const currentChunkLoaded = e.loaded;
-          const totalUploadedSoFar = Math.min(start + currentChunkLoaded, file.size);
+          chunkLoadedMapRef.current.set(chunkIndex, e.loaded);
+
+          // Aggregate uploaded bytes across all completed and concurrent chunks
+          const completedBytes = completedChunksSetRef.current.size * CHUNK_SIZE;
+          let inFlightBytes = 0;
+          chunkLoadedMapRef.current.forEach((bytes) => {
+            inFlightBytes += bytes;
+          });
+          const totalUploadedSoFar = Math.min(completedBytes + inFlightBytes, file.size);
 
           const now = Date.now();
           const dt = (now - lastProgressTime) / 1000;
           if (dt >= 0.25) {
-            const dLoaded = currentChunkLoaded - lastProgressLoaded;
+            const dLoaded = e.loaded - lastProgressLoaded;
             const instantSpeed = dLoaded / dt;
             lastProgressTime = now;
-            lastProgressLoaded = currentChunkLoaded;
+            lastProgressLoaded = e.loaded;
 
             const speed = instantSpeed > 0 ? instantSpeed : 0;
             const remainingBytes = Math.max(0, file.size - totalUploadedSoFar);
@@ -127,7 +136,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
               return {
                 ...prev,
                 uploadedBytes: totalUploadedSoFar,
-                currentChunkIndex: chunkIndex,
+                currentChunkIndex: completedChunksSetRef.current.size,
                 speed: smoothedSpeed,
                 remainingSeconds: remainingSec,
               };
@@ -138,14 +147,14 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
               return {
                 ...prev,
                 uploadedBytes: totalUploadedSoFar,
-                currentChunkIndex: chunkIndex,
+                currentChunkIndex: completedChunksSetRef.current.size,
               };
             });
           }
         };
 
         xhr.onload = () => {
-          activeXhrRef.current = null;
+          activeXhrsRef.current.delete(xhr);
           if (xhr.status >= 200 && xhr.status < 300) {
             try {
               const resp = JSON.parse(xhr.responseText);
@@ -165,16 +174,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                   setUpload(null);
                   if (fileInputRef.current) fileInputRef.current.value = '';
                 }, 2000);
-              } else {
-                setUpload((prev) =>
-                  prev
-                    ? {
-                        ...prev,
-                        uploadedBytes: Math.min(end, file.size),
-                        currentChunkIndex: chunkIndex + 1,
-                      }
-                    : null
-                );
               }
               resolve();
             } catch (e) {
@@ -186,12 +185,12 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         };
 
         xhr.onerror = () => {
-          activeXhrRef.current = null;
+          activeXhrsRef.current.delete(xhr);
           reject(new Error('Сетевой сбой при передаче чанка'));
         };
 
         xhr.onabort = () => {
-          activeXhrRef.current = null;
+          activeXhrsRef.current.delete(xhr);
           reject(new Error('Загрузка чанка отменена'));
         };
 
@@ -201,123 +200,81 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     [roomId, hostToken, socketId]
   );
 
-  // Sequential chunk upload loop with auto-retry and status sync
+  // Concurrent (попутная) chunk upload loop with concurrency pool
   const uploadChunkLoop = useCallback(
-    async (file: File, fileId: string, startChunkIndex: number) => {
+    async (file: File, fileId: string, initialPendingChunks: number[]) => {
+      const queue = [...initialPendingChunks];
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-      let chunkIndex = startChunkIndex;
+      const CONCURRENCY = 3; // 3 concurrent chunks uploaded in parallel
 
-      while (chunkIndex < totalChunks) {
-        if (isPausedRef.current || isCancelledRef.current) {
-          return;
-        }
+      const worker = async (): Promise<void> => {
+        while (queue.length > 0) {
+          if (isPausedRef.current || isCancelledRef.current) return;
+          const chunkIndex = queue.shift();
+          if (chunkIndex === undefined) return;
 
-        const start = chunkIndex * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
-        const chunkBlob = file.slice(start, end);
+          const start = chunkIndex * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          const chunkBlob = file.slice(start, end);
 
-        let success = false;
-        let attempt = 0;
+          let success = false;
+          let attempt = 0;
 
-        while (!success && attempt <= 3) {
-          if (isPausedRef.current || isCancelledRef.current) {
-            return;
-          }
-
-          try {
-            if (attempt > 0) {
-              setUpload((prev) =>
-                prev ? { ...prev, status: 'retrying', retryAttempt: attempt } : null
-              );
-              // Wait 1.5 seconds between retries
-              await new Promise((r) => setTimeout(r, 1500));
-              if (isPausedRef.current || isCancelledRef.current) return;
-
-              // Query server status to confirm verified byte offset
-              try {
-                const statusRes = await fetch(
-                  `/api/rooms/${roomId}/upload/status/${fileId}`
+          while (!success && attempt <= 3) {
+            if (isPausedRef.current || isCancelledRef.current) return;
+            try {
+              if (attempt > 0) {
+                setUpload((prev) =>
+                  prev ? { ...prev, status: 'retrying', retryAttempt: attempt } : null
                 );
-                if (statusRes.ok) {
-                  const statusData = await statusRes.json();
-                  if (statusData.completed) {
-                    setUpload((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            status: 'completed',
-                            uploadedBytes: file.size,
-                            speed: 0,
-                            remainingSeconds: 0,
-                          }
-                        : null
-                    );
-                    setTimeout(() => {
-                      setUpload(null);
-                      if (fileInputRef.current) fileInputRef.current.value = '';
-                    }, 2000);
-                    return;
-                  }
-                  if (typeof statusData.uploadedBytes === 'number') {
-                    const serverChunk = Math.floor(
-                      statusData.uploadedBytes / CHUNK_SIZE
-                    );
-                    if (serverChunk > chunkIndex) {
-                      chunkIndex = serverChunk;
-                      break;
-                    }
-                  }
-                }
-              } catch {}
-            }
+                await new Promise((r) => setTimeout(r, 1200));
+                if (isPausedRef.current || isCancelledRef.current) return;
+              }
 
-            await uploadChunkWithProgress(
-              file,
-              fileId,
-              chunkIndex,
-              start,
-              end,
-              chunkBlob,
-              totalChunks
-            );
-
-            success = true;
-            setUpload((prev) =>
-              prev ? { ...prev, retryAttempt: 0, status: 'uploading' } : null
-            );
-          } catch (err) {
-            if (isPausedRef.current || isCancelledRef.current) {
-              return;
-            }
-            attempt++;
-            if (attempt > 3) {
-              setUpload((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      status: 'error',
-                      retryAttempt: 3,
-                      errorMessage:
-                        'Сбой сети при передаче чанка. Проверьте соединение и нажмите "Повторить".',
-                    }
-                  : null
+              await uploadChunkWithProgress(
+                file,
+                fileId,
+                chunkIndex,
+                start,
+                end,
+                chunkBlob,
+                totalChunks
               );
-              return;
+
+              success = true;
+              completedChunksSetRef.current.add(chunkIndex);
+              chunkLoadedMapRef.current.delete(chunkIndex);
+            } catch (err) {
+              if (isPausedRef.current || isCancelledRef.current) return;
+              attempt++;
+              if (attempt > 3) {
+                setUpload((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        status: 'error',
+                        retryAttempt: 3,
+                        errorMessage: 'Сбой сети при передаче чанка. Нажмите "Повторить".',
+                      }
+                    : null
+                );
+                return;
+              }
             }
           }
         }
+      };
 
-        if (!success) {
-          return;
-        }
-
-        chunkIndex++;
-      }
+      const workers = Array.from(
+        { length: Math.min(CONCURRENCY, queue.length) },
+        () => worker()
+      );
+      await Promise.all(workers);
     },
-    [roomId, uploadChunkWithProgress]
+    [uploadChunkWithProgress]
   );
 
-  // File Picker Handler (Resumable Chunked Upload initialization)
+  // File Picker Handler (Resumable Concurrent Chunked Upload initialization)
   const handleFiles = (files: FileList | null) => {
     if (!files || files.length === 0 || !isHost) return;
 
@@ -336,6 +293,8 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
 
     isPausedRef.current = false;
     isCancelledRef.current = false;
+    completedChunksSetRef.current.clear();
+    chunkLoadedMapRef.current.clear();
 
     setUpload({
       file,
@@ -350,22 +309,21 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       retryAttempt: 0,
     });
 
-    uploadChunkLoop(file, fileId, 0);
+    const allChunks = Array.from({ length: totalChunks }, (_, i) => i);
+    uploadChunkLoop(file, fileId, allChunks);
   };
 
   // Pause in-flight upload
   const handlePauseUpload = () => {
     isPausedRef.current = true;
-    if (activeXhrRef.current) {
-      activeXhrRef.current.abort();
-      activeXhrRef.current = null;
-    }
+    activeXhrsRef.current.forEach((xhr) => xhr.abort());
+    activeXhrsRef.current.clear();
     setUpload((prev) =>
       prev ? { ...prev, status: 'paused', speed: 0, remainingSeconds: 0 } : null
     );
   };
 
-  // Resume paused upload
+  // Resume paused upload with concurrency
   const handleResumeUpload = async () => {
     if (!upload) return;
     isPausedRef.current = false;
@@ -374,7 +332,8 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       prev ? { ...prev, status: 'uploading', errorMessage: null } : null
     );
 
-    let startChunk = upload.currentChunkIndex;
+    const totalChunks = Math.ceil(upload.file.size / CHUNK_SIZE);
+    let pendingChunks: number[] = [];
     try {
       const res = await fetch(`/api/rooms/${roomId}/upload/status/${upload.fileId}`);
       if (res.ok) {
@@ -397,23 +356,32 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           }, 2000);
           return;
         }
-        if (typeof data.uploadedBytes === 'number') {
-          startChunk = Math.floor(data.uploadedBytes / CHUNK_SIZE);
+        if (Array.isArray(data.completedChunks)) {
+          data.completedChunks.forEach((c: number) =>
+            completedChunksSetRef.current.add(c)
+          );
         }
       }
     } catch {}
 
-    uploadChunkLoop(upload.file, upload.fileId, startChunk);
+    for (let i = 0; i < totalChunks; i++) {
+      if (!completedChunksSetRef.current.has(i)) {
+        pendingChunks.push(i);
+      }
+    }
+
+    uploadChunkLoop(upload.file, upload.fileId, pendingChunks);
   };
 
   // Cancel in-flight upload and purge .part file from server disk
   const handleCancelUpload = async () => {
     isCancelledRef.current = true;
     isPausedRef.current = true;
-    if (activeXhrRef.current) {
-      activeXhrRef.current.abort();
-      activeXhrRef.current = null;
-    }
+    activeXhrsRef.current.forEach((xhr) => xhr.abort());
+    activeXhrsRef.current.clear();
+    completedChunksSetRef.current.clear();
+    chunkLoadedMapRef.current.clear();
+
     const currentFileId = upload?.fileId;
     setUpload(null);
     if (fileInputRef.current) fileInputRef.current.value = '';

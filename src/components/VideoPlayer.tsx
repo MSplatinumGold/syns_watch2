@@ -18,6 +18,8 @@ import {
   UploadCloud,
   PanelRightClose,
   PanelRightOpen,
+  Download,
+  CheckCircle2,
 } from 'lucide-react';
 import type { PlaylistItem, RoomPlaybackState, DanmakuItem } from '../types/watchparty.ts';
 import { formatTime, parseTime } from '../utils/format.ts';
@@ -97,6 +99,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const stageRef = useRef<HTMLDivElement>(null);
   const [stageDimensions, setStageDimensions] = useState<{ width: number; height: number } | null>(null);
 
+  // Item 2: Preload entire video in advance into browser memory / blob
+  const [preloadProgress, setPreloadProgress] = useState<number | null>(null);
+  const [isFullyPreloaded, setIsFullyPreloaded] = useState(false);
+  const [preloadedBlobUrl, setPreloadedBlobUrl] = useState<string | null>(null);
+  const [bufferAheadSeconds, setBufferAheadSeconds] = useState(0);
+  const preloadControllerRef = useRef<AbortController | null>(null);
+  const isPrefetchingAheadRef = useRef(false);
+
   // Compute maximum 16:9 viewport fit to eliminate dead black space on large screens (WQHD/4K/PC)
   useEffect(() => {
     const el = stageRef.current;
@@ -140,14 +150,25 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [playbackState.currentTime, playbackState.lastUpdatedServerTime]);
 
-  // Video source handling
-  const videoSourceUrl = currentTrack?.url;
+  // Video source handling: prioritizes local preloaded blob if available, else network stream URL
+  const videoSourceUrl = preloadedBlobUrl || currentTrack?.url;
 
-  // Track changed -> Immediately reset timecode to 0:00 (Item 3)
+  // Track changed -> Immediately reset timecode, buffer, and cached blob
   useEffect(() => {
     setCurrentTime(0);
     setBufferedPercent(0);
+    setBufferAheadSeconds(0);
     setScrubbingTime(null);
+    setIsFullyPreloaded(false);
+    setPreloadProgress(null);
+    if (preloadedBlobUrl) {
+      URL.revokeObjectURL(preloadedBlobUrl);
+      setPreloadedBlobUrl(null);
+    }
+    if (preloadControllerRef.current) {
+      preloadControllerRef.current.abort();
+      preloadControllerRef.current = null;
+    }
     syncAnchorRef.current = {
       currentTime: 0,
       serverTimestamp: Date.now(),
@@ -156,6 +177,125 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       videoRef.current.currentTime = 0;
     }
   }, [currentTrack?.id, currentTrackIndex]);
+
+  // Handler to preload full video in advance into browser memory (Item 2)
+  const handlePreloadFullVideo = async () => {
+    const rawUrl = currentTrack?.url;
+    if (!rawUrl || preloadProgress !== null || isFullyPreloaded) return;
+
+    setPreloadProgress(0);
+    const controller = new AbortController();
+    preloadControllerRef.current = controller;
+
+    try {
+      const res = await fetch(rawUrl, {
+        signal: controller.signal,
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const total = parseInt(
+        res.headers.get('content-length') || `${currentTrack?.size || 0}`,
+        10
+      );
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('ReadableStream not supported');
+
+      const chunks: Uint8Array[] = [];
+      let loaded = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          loaded += value.length;
+          if (total > 0) {
+            const pct = Math.min(100, Math.round((loaded / total) * 100));
+            setPreloadProgress(pct);
+          }
+        }
+      }
+
+      const mime = currentTrack?.mimeType || 'video/mp4';
+      const blob = new Blob(chunks as unknown as BlobPart[], { type: mime });
+      const blobUrl = URL.createObjectURL(blob);
+
+      setPreloadedBlobUrl(blobUrl);
+      setIsFullyPreloaded(true);
+      setPreloadProgress(null);
+
+      // Seamlessly switch video source without losing playback position
+      if (videoRef.current) {
+        const curTime = videoRef.current.currentTime;
+        const wasPlaying = !videoRef.current.paused;
+        videoRef.current.src = blobUrl;
+        videoRef.current.currentTime = curTime;
+        if (wasPlaying) {
+          videoRef.current.play().catch(() => {});
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        console.error('Full video preload error:', err);
+      }
+      setPreloadProgress(null);
+    }
+  };
+
+  // Proactive 5-minute (300 seconds) forward reserve buffer check (Item 3)
+  useEffect(() => {
+    if (!videoSourceUrl || isFullyPreloaded) return;
+
+    const bufferCheckInterval = setInterval(async () => {
+      const video = videoRef.current;
+      if (!video || !duration || duration <= 0) return;
+
+      // Calculate buffer ahead of current playback position
+      let ahead = 0;
+      const cur = video.currentTime;
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) <= cur && cur <= video.buffered.end(i)) {
+          ahead = video.buffered.end(i) - cur;
+          break;
+        }
+      }
+      setBufferAheadSeconds(ahead);
+
+      // Ensure minimum 5 minutes (300 seconds) in reserve
+      const TARGET_RESERVE = 300;
+      if (ahead < TARGET_RESERVE && cur + ahead < duration && !isPrefetchingAheadRef.current) {
+        isPrefetchingAheadRef.current = true;
+        try {
+          const rawUrl = currentTrack?.url;
+          if (!rawUrl) return;
+
+          const totalBytes = currentTrack?.size || duration * 250000;
+          const bitrate = totalBytes / duration;
+
+          const startSec = cur + ahead;
+          const endSec = Math.min(duration, startSec + 60);
+
+          const startByte = Math.floor(startSec * bitrate);
+          const endByte = Math.min(totalBytes - 1, Math.floor(endSec * bitrate));
+
+          if (endByte > startByte) {
+            await fetch(rawUrl, {
+              headers: {
+                Range: `bytes=${startByte}-${endByte}`,
+              },
+            });
+          }
+        } catch {
+          // Ignore prefetch aborts
+        } finally {
+          isPrefetchingAheadRef.current = false;
+        }
+      }
+    }, 3500);
+
+    return () => clearInterval(bufferCheckInterval);
+  }, [videoSourceUrl, duration, currentTrack, isFullyPreloaded]);
 
   // Track Ended -> Host trigger auto next or pause if last track (Item 1)
   const handleEnded = useCallback(() => {
@@ -834,6 +974,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <span>{formatTime(duration)}</span>
             </div>
 
+            {/* 5-Minute Reserve Buffer Badge (Item 3) */}
+            {videoSourceUrl && duration > 0 && (
+              <div
+                className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900/90 border border-neutral-700/60 text-[11px] font-mono"
+                title={
+                  isFullyPreloaded
+                    ? 'Видео загружено в память браузера (100%)'
+                    : bufferAheadSeconds >= 300
+                    ? `Запас буфера отличный: ${Math.floor(bufferAheadSeconds / 60)} мин ${Math.floor(bufferAheadSeconds % 60)} сек (норма 5+ мин)`
+                    : `Запас буфера: ${Math.floor(bufferAheadSeconds / 60)} мин ${Math.floor(bufferAheadSeconds % 60)} сек (докачка до 5 мин в фоне...)`
+                }
+              >
+                <span className={isFullyPreloaded || bufferAheadSeconds >= 300 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                  ⚡
+                </span>
+                <span className="text-neutral-400">Запас:</span>
+                <span className={isFullyPreloaded || bufferAheadSeconds >= 300 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
+                  {isFullyPreloaded
+                    ? '100%'
+                    : bufferAheadSeconds >= 300
+                    ? '5:00+ OK'
+                    : `+${Math.floor(bufferAheadSeconds / 60)}:${Math.floor(bufferAheadSeconds % 60).toString().padStart(2, '0')}`}
+                </span>
+              </div>
+            )}
+
             {/* Volume Control */}
             <div className="flex items-center gap-1.5 group/vol">
               <button
@@ -901,6 +1067,39 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   <Clock className="w-3 h-3" />
                 </button>
               </form>
+            )}
+
+            {/* Full Video Preload Button (Item 2: Загрузить всё видео сразу в память) */}
+            {videoSourceUrl && (
+              <>
+                {isFullyPreloaded ? (
+                  <div
+                    className="px-2 py-1 rounded-lg bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-medium flex items-center gap-1.5"
+                    title="Видео загружено целиком в локальную память браузера. Поток не докачивается при просмотре."
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span className="hidden md:inline">В кэше 100%</span>
+                  </div>
+                ) : preloadProgress !== null ? (
+                  <div
+                    className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-700 text-xs font-mono text-amber-300 flex items-center gap-1.5"
+                    title="Идет полная предзагрузка видео в кэш браузера..."
+                  >
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                    <span>{preloadProgress}%</span>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handlePreloadFullVideo}
+                    className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white border border-neutral-700 text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+                    title="Загрузить видео целиком в память браузера сразу, чтобы не докачивать поток во время просмотра"
+                  >
+                    <Download className="w-3.5 h-3.5 text-rose-400" />
+                    <span className="hidden md:inline">Предзагрузить всё</span>
+                  </button>
+                )}
+              </>
             )}
 
             {/* Theater Mode Toggle (Hide/Show sidebar on PC) */}
