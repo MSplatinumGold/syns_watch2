@@ -1000,8 +1000,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </div>
             )}
 
-            {/* Volume Control */}
-            <div className="flex items-center gap-1.5 group/vol">
+            {/* Volume Control (hidden on mobile phones to preserve space for controls) */}
+            <div className="hidden sm:flex items-center gap-1.5 group/vol">
               <button
                 onClick={toggleMute}
                 className="p-1.5 rounded-lg hover:bg-white/10 text-neutral-300 hover:text-white transition cursor-pointer"
