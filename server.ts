@@ -3,6 +3,7 @@ import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import path from 'path';
 import fs from 'fs';
+import fsPromises from 'fs/promises';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
@@ -28,6 +29,7 @@ if (!fs.existsSync(STORAGE_BASE_DIR)) {
 
 interface ServerRoomState extends RoomState {
   hostToken: string;
+  creatorIp?: string;
 }
 
 // In-memory room store
@@ -64,6 +66,8 @@ const upload = multer({
 });
 
 const app = express();
+app.set('trust proxy', true);
+
 const server = http.createServer(app);
 
 const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents>(server, {
@@ -76,12 +80,113 @@ const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents>(server
 
 app.use(express.json());
 
+// Track rooms per creator IP (FIFO limit: max 10 rooms per IP)
+const ipToRooms = new Map<string, string[]>();
+
+// In-memory upload sessions for concurrent chunked upload
+interface ChunkUploadSession {
+  fileId: string;
+  roomId: string;
+  totalChunks: number;
+  totalSize: number;
+  fileName: string;
+  completedChunks: Set<number>;
+  lastActivity: number;
+  isFinalizing: boolean;
+}
+
+const uploadSessions = new Map<string, ChunkUploadSession>();
+
+// Immediate Room Purge (cleans storage, clears upload sessions, updates IP limits, and notifies sockets)
+function purgeRoom(roomId: string, reason = 'Комната закрыта. Все файлы и данные удалены.') {
+  const room = rooms.get(roomId);
+  if (room && room.emptyTimeoutId) {
+    clearTimeout(room.emptyTimeoutId);
+    room.emptyTimeoutId = null;
+  }
+
+  io.to(roomId).emit('room:closed', { reason });
+
+  // Remove room from ipToRooms registry
+  for (const [ip, roomIds] of ipToRooms.entries()) {
+    const nextList = roomIds.filter((id) => id !== roomId);
+    if (nextList.length === 0) {
+      ipToRooms.delete(ip);
+    } else {
+      ipToRooms.set(ip, nextList);
+    }
+  }
+
+  // Clean up any in-flight upload sessions for this room
+  for (const [fId, sess] of uploadSessions.entries()) {
+    if (sess.roomId === roomId) {
+      uploadSessions.delete(fId);
+    }
+  }
+
+  // Asynchronously purge room directory on disk without blocking the event loop
+  const roomDir = path.join(STORAGE_BASE_DIR, roomId);
+  fsPromises
+    .rm(roomDir, { recursive: true, force: true })
+    .then(() => {
+      console.log(`[WatchParty] Хранилище очищено для комнаты ${roomId}`);
+    })
+    .catch((err) => {
+      console.error(`Ошибка при удалении хранилища комнаты ${roomId}:`, err);
+    });
+
+  rooms.delete(roomId);
+}
+
+// Auto-cleanup abandoned uploads older than 60 seconds (checks every 15 seconds)
+setInterval(async () => {
+  const now = Date.now();
+  const ABANDONED_TIMEOUT_MS = 60 * 1000;
+
+  for (const [fileId, session] of uploadSessions.entries()) {
+    if (!session.isFinalizing && now - session.lastActivity > ABANDONED_TIMEOUT_MS) {
+      console.log(
+        `[Auto-Cleanup] Удалена заброшенная загрузка ${fileId} ("${session.fileName}") в комнате ${session.roomId}`
+      );
+      uploadSessions.delete(fileId);
+
+      const roomDir = getRoomStorageDir(session.roomId);
+      const partPath = path.join(roomDir, `${fileId}.part`);
+      const metaPath = path.join(roomDir, `${fileId}.info`);
+
+      try {
+        await fsPromises.unlink(partPath).catch(() => {});
+        await fsPromises.unlink(metaPath).catch(() => {});
+      } catch (err) {
+        console.error(`[Auto-Cleanup] Ошибка удаления файлов для ${fileId}:`, err);
+      }
+    }
+  }
+}, 15000);
+
 // -----------------------------------------------------------------------------
 // REST API Endpoints
 // -----------------------------------------------------------------------------
 
-// Create a new room
+// Create a new room with 10-room FIFO limit per IP
 app.post('/api/rooms/create', (req, res) => {
+  const clientIp =
+    req.ip ||
+    (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+    req.socket.remoteAddress ||
+    'unknown';
+
+  const userRooms = ipToRooms.get(clientIp) || [];
+
+  // FIFO rotation: if user already has 10 rooms, close the oldest one
+  while (userRooms.length >= 10) {
+    const oldestRoomId = userRooms.shift();
+    if (oldestRoomId) {
+      console.log(`[Limit] IP ${clientIp} превысил лимит 10 комнат. Закрытие старой комнаты ${oldestRoomId}`);
+      purgeRoom(oldestRoomId, 'Лимит комнат (10) для вашего IP исчерпан. Старая комната закрыта.');
+    }
+  }
+
   const { nickname } = req.body;
   const rawNick = (nickname || 'Хост').toString().trim().slice(0, 30);
   const roomId = Math.random().toString(36).substring(2, 8).toLowerCase();
@@ -91,6 +196,7 @@ app.post('/api/rooms/create', (req, res) => {
     roomId,
     hostId: '',
     hostToken,
+    creatorIp: clientIp,
     users: {},
     playlist: [],
     currentTrackIndex: 0,
@@ -105,6 +211,9 @@ app.post('/api/rooms/create', (req, res) => {
 
   rooms.set(roomId, newRoom);
   getRoomStorageDir(roomId);
+
+  userRooms.push(roomId);
+  ipToRooms.set(clientIp, userRooms);
 
   res.json({
     roomId,
@@ -202,18 +311,8 @@ app.post('/api/rooms/:roomId/upload', upload.array('videos', 10), (req, res) => 
   });
 });
 
-interface ChunkUploadSession {
-  fileId: string;
-  totalChunks: number;
-  totalSize: number;
-  fileName: string;
-  completedChunks: Set<number>;
-}
-
-const uploadSessions = new Map<string, ChunkUploadSession>();
-
-// Check upload status of a file for resumable concurrent chunked upload
-app.get('/api/rooms/:roomId/upload/status/:fileId', (req, res) => {
+// Check upload status of a file for concurrent chunked upload
+app.get('/api/rooms/:roomId/upload/status/:fileId', async (req, res) => {
   const { roomId, fileId } = req.params;
   const room = rooms.get(roomId);
   if (!room) {
@@ -227,29 +326,33 @@ app.get('/api/rooms/:roomId/upload/status/:fileId', (req, res) => {
 
   // Check active in-memory session
   const session = uploadSessions.get(fileId);
-  if (session && fs.existsSync(partPath)) {
-    res.json({
-      exists: true,
-      completed: false,
-      completedChunks: Array.from(session.completedChunks),
-      totalChunks: session.totalChunks,
-    });
-    return;
+  if (session) {
+    session.lastActivity = Date.now();
+    try {
+      await fsPromises.access(partPath);
+      res.json({
+        exists: true,
+        completed: session.isFinalizing,
+        completedChunks: Array.from(session.completedChunks),
+        totalChunks: session.totalChunks,
+      });
+      return;
+    } catch {}
   }
 
   // Check if .part exists with persisted .info on disk
-  if (fs.existsSync(partPath)) {
+  try {
+    await fsPromises.access(partPath);
     let completedChunks: number[] = [];
     let totalChunks = 0;
-    if (fs.existsSync(metaPath)) {
-      try {
-        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        if (Array.isArray(meta.completedChunks)) {
-          completedChunks = meta.completedChunks;
-        }
-        totalChunks = meta.totalChunks || 0;
-      } catch {}
-    }
+    try {
+      const metaContent = await fsPromises.readFile(metaPath, 'utf-8');
+      const meta = JSON.parse(metaContent);
+      if (Array.isArray(meta.completedChunks)) {
+        completedChunks = meta.completedChunks;
+      }
+      totalChunks = meta.totalChunks || 0;
+    } catch {}
     res.json({
       exists: true,
       completed: false,
@@ -257,7 +360,7 @@ app.get('/api/rooms/:roomId/upload/status/:fileId', (req, res) => {
       totalChunks,
     });
     return;
-  }
+  } catch {}
 
   // Check if already completed and in playlist
   const existingItem = room.playlist.find((item) => item.id === fileId);
@@ -272,11 +375,11 @@ app.get('/api/rooms/:roomId/upload/status/:fileId', (req, res) => {
   }
 
   // Check if finalized file exists on disk
-  if (fs.existsSync(roomDir)) {
-    const files = fs.readdirSync(roomDir);
+  try {
+    const files = await fsPromises.readdir(roomDir);
     const matched = files.find((f) => f.startsWith(fileId) && !f.endsWith('.part') && !f.endsWith('.info'));
     if (matched) {
-      const stat = fs.statSync(path.join(roomDir, matched));
+      const stat = await fsPromises.stat(path.join(roomDir, matched));
       res.json({
         exists: true,
         completed: true,
@@ -284,7 +387,7 @@ app.get('/api/rooms/:roomId/upload/status/:fileId', (req, res) => {
       });
       return;
     }
-  }
+  } catch {}
 
   res.json({
     exists: false,
@@ -294,8 +397,8 @@ app.get('/api/rooms/:roomId/upload/status/:fileId', (req, res) => {
   });
 });
 
-// Resumable Concurrent Chunked Upload (5MB slices with Zero-Copy streaming disk I/O, near-zero RAM footprint)
-app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
+// Concurrent Chunked Upload with fully async Zero-Copy streaming disk I/O and race condition protection
+app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
   const { roomId } = req.params;
   const room = rooms.get(roomId);
   if (!room) {
@@ -333,11 +436,13 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
   const partPath = path.join(roomDir, `${fileId}.part`);
   const metaPath = path.join(roomDir, `${fileId}.info`);
 
-  // Ensure file exists on disk so concurrent chunk writes can open with 'r+' safely
-  if (!fs.existsSync(partPath)) {
+  // Ensure file exists on disk asynchronously so concurrent chunk writes can open with 'r+' safely
+  try {
+    await fsPromises.access(partPath);
+  } catch {
     try {
-      const fd = fs.openSync(partPath, 'w');
-      fs.closeSync(fd);
+      const handle = await fsPromises.open(partPath, 'w');
+      await handle.close();
     } catch {}
   }
 
@@ -346,31 +451,37 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
   if (!session) {
     session = {
       fileId,
+      roomId,
       totalChunks,
       totalSize,
       fileName,
       completedChunks: new Set<number>(),
+      lastActivity: Date.now(),
+      isFinalizing: false,
     };
-    if (fs.existsSync(metaPath)) {
-      try {
-        const savedMeta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        if (Array.isArray(savedMeta.completedChunks)) {
-          savedMeta.completedChunks.forEach((c: number) => session!.completedChunks.add(c));
-        }
-      } catch {}
-    }
+    try {
+      const savedMetaStr = await fsPromises.readFile(metaPath, 'utf-8');
+      const savedMeta = JSON.parse(savedMetaStr);
+      if (Array.isArray(savedMeta.completedChunks)) {
+        savedMeta.completedChunks.forEach((c: number) => session!.completedChunks.add(c));
+      }
+    } catch {}
     uploadSessions.set(fileId, session);
+  }
+
+  // Keep alive: update last activity timestamp
+  session.lastActivity = Date.now();
+
+  // If session is already finalizing from other completed chunks, ignore further writes
+  if (session.isFinalizing) {
+    res.json({ success: true, completed: true, alreadyFinalized: true });
+    return;
   }
 
   // Open writeStream directly at chunk offset with zero Node.js userland buffering
   const writeStream = fs.createWriteStream(partPath, {
     flags: 'r+',
     start: chunkOffset,
-  });
-
-  let bytesReceivedThisChunk = 0;
-  req.on('data', (chunk: Buffer) => {
-    bytesReceivedThisChunk += chunk.length;
   });
 
   req.pipe(writeStream);
@@ -390,50 +501,52 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
     }
   });
 
-  writeStream.on('finish', () => {
+  writeStream.on('finish', async () => {
     try {
-      session!.completedChunks.add(chunkIndex);
+      if (!session) return;
+      session.completedChunks.add(chunkIndex);
+      session.lastActivity = Date.now();
 
-      // Persist completed chunks list for resume support
-      try {
-        fs.writeFileSync(
+      // Persist completed chunks list asynchronously for resume/inspection support
+      fsPromises
+        .writeFile(
           metaPath,
           JSON.stringify({
             fileId,
             fileName,
             totalSize,
             totalChunks,
-            completedChunks: Array.from(session!.completedChunks),
+            completedChunks: Array.from(session.completedChunks),
             updatedAt: Date.now(),
           })
-        );
-      } catch {}
+        )
+        .catch(() => {});
 
-      // Finalize ONLY when every single chunk has completed
-      const isAllCompleted = session!.completedChunks.size === totalChunks;
+      // Finalize ONLY when every single chunk has completed, strictly guarded against race conditions
+      const isAllCompleted = session.completedChunks.size === totalChunks;
 
       if (isAllCompleted) {
+        // Race condition guard: execute finalization strictly once across concurrent chunks
+        if (session.isFinalizing) {
+          return;
+        }
+        session.isFinalizing = true;
+
         if (totalSize > 0) {
-          try {
-            fs.truncateSync(partPath, totalSize);
-          } catch {}
+          await fsPromises.truncate(partPath, totalSize).catch(() => {});
         }
 
         const ext = path.extname(fileName).toLowerCase() || '.mp4';
         const finalFilename = `${fileId}${ext}`;
         const finalPath = path.join(roomDir, finalFilename);
 
-        // Atomic rename .part -> permanent file
-        fs.renameSync(partPath, finalPath);
+        // Fully async atomic rename .part -> permanent file
+        await fsPromises.rename(partPath, finalPath);
 
-        if (fs.existsSync(metaPath)) {
-          try {
-            fs.unlinkSync(metaPath);
-          } catch {}
-        }
+        await fsPromises.unlink(metaPath).catch(() => {});
         uploadSessions.delete(fileId);
 
-        const finalStat = fs.statSync(finalPath);
+        const finalStat = await fsPromises.stat(finalPath);
         const item: PlaylistItem = {
           id: fileId,
           originalName: fileName,
@@ -460,24 +573,28 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
           type: 'system',
         });
 
-        res.json({
-          success: true,
-          completed: true,
-          uploadedBytes: item.size,
-          chunkIndex,
-          completedCount: session!.completedChunks.size,
-          totalChunks,
-          item,
-          playlist: room.playlist,
-        });
+        if (!res.headersSent) {
+          res.json({
+            success: true,
+            completed: true,
+            uploadedBytes: item.size,
+            chunkIndex,
+            completedCount: session.completedChunks.size,
+            totalChunks,
+            item,
+            playlist: room.playlist,
+          });
+        }
       } else {
-        res.json({
-          success: true,
-          completed: false,
-          chunkIndex,
-          completedCount: session!.completedChunks.size,
-          totalChunks,
-        });
+        if (!res.headersSent) {
+          res.json({
+            success: true,
+            completed: false,
+            chunkIndex,
+            completedCount: session.completedChunks.size,
+            totalChunks,
+          });
+        }
       }
     } catch (err) {
       console.error('Error finalizing chunk write:', err);
@@ -488,8 +605,8 @@ app.post('/api/rooms/:roomId/upload/chunk', (req, res) => {
   });
 });
 
-// Cancel in-flight chunked upload and immediately delete .part files from disk
-app.post('/api/rooms/:roomId/upload/cancel/:fileId', (req, res) => {
+// Cancel in-flight chunked upload and immediately delete .part files asynchronously
+app.post('/api/rooms/:roomId/upload/cancel/:fileId', async (req, res) => {
   const { roomId, fileId } = req.params;
   const room = rooms.get(roomId);
   if (!room) {
@@ -517,12 +634,8 @@ app.post('/api/rooms/:roomId/upload/cancel/:fileId', (req, res) => {
   const metaPath = path.join(roomDir, `${fileId}.info`);
 
   try {
-    if (fs.existsSync(partPath)) {
-      fs.unlinkSync(partPath);
-    }
-    if (fs.existsSync(metaPath)) {
-      fs.unlinkSync(metaPath);
-    }
+    await fsPromises.unlink(partPath).catch(() => {});
+    await fsPromises.unlink(metaPath).catch(() => {});
   } catch (err) {
     console.error('Error removing .part on cancel:', err);
   }
@@ -668,28 +781,6 @@ app.get('/api/rooms/:roomId/stream/:fileId', (req, res) => {
 
 io.on('connection', (socket) => {
   let currentRoomId: string | null = null;
-
-  // Immediate Room Purge (Item 4: delete all files and room records on close or when empty)
-  function purgeRoom(roomId: string, reason = 'Комната закрыта. Все файлы и данные удалены.') {
-    const room = rooms.get(roomId);
-    if (room && room.emptyTimeoutId) {
-      clearTimeout(room.emptyTimeoutId);
-      room.emptyTimeoutId = null;
-    }
-
-    io.to(roomId).emit('room:closed', { reason });
-
-    const roomDir = path.join(STORAGE_BASE_DIR, roomId);
-    if (fs.existsSync(roomDir)) {
-      try {
-        fs.rmSync(roomDir, { recursive: true, force: true });
-        console.log(`[WatchParty] Storage cleared for room ${roomId}`);
-      } catch (err) {
-        console.error(`Error deleting storage for room ${roomId}:`, err);
-      }
-    }
-    rooms.delete(roomId);
-  }
 
   // Join Room
   socket.on('room:join', ({ roomId, nickname, hostToken }) => {

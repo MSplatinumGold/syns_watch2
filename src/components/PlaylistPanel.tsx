@@ -2,7 +2,6 @@ import React, { useState, useRef, useCallback } from 'react';
 import {
   UploadCloud,
   Play,
-  Pause,
   Trash2,
   ChevronUp,
   ChevronDown,
@@ -30,7 +29,7 @@ function formatRemainingTime(seconds: number): string {
 interface ResumableUploadState {
   file: File;
   fileId: string;
-  status: 'uploading' | 'paused' | 'retrying' | 'error' | 'completed';
+  status: 'uploading' | 'retrying' | 'error' | 'completed';
   uploadedBytes: number;
   totalBytes: number;
   currentChunkIndex: number;
@@ -68,7 +67,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   const activeXhrsRef = useRef<Set<XMLHttpRequest>>(new Set());
   const chunkLoadedMapRef = useRef<Map<number, number>>(new Map());
   const completedChunksSetRef = useRef<Set<number>>(new Set());
-  const isPausedRef = useRef(false);
   const isCancelledRef = useRef(false);
 
   const [upload, setUpload] = useState<ResumableUploadState | null>(null);
@@ -107,7 +105,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         xhr.setRequestHeader('x-total-chunks', totalChunks.toString());
 
         xhr.upload.onprogress = (e) => {
-          if (isPausedRef.current || isCancelledRef.current) return;
+          if (isCancelledRef.current) return;
           chunkLoadedMapRef.current.set(chunkIndex, e.loaded);
 
           // Aggregate uploaded bytes across all completed and concurrent in-flight chunks
@@ -210,7 +208,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
 
       const worker = async (): Promise<void> => {
         while (queue.length > 0) {
-          if (isPausedRef.current || isCancelledRef.current) return;
+          if (isCancelledRef.current) return;
           const chunkIndex = queue.shift();
           if (chunkIndex === undefined) return;
 
@@ -222,14 +220,14 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           let attempt = 0;
 
           while (!success && attempt <= 3) {
-            if (isPausedRef.current || isCancelledRef.current) return;
+            if (isCancelledRef.current) return;
             try {
               if (attempt > 0) {
                 setUpload((prev) =>
                   prev ? { ...prev, status: 'retrying', retryAttempt: attempt } : null
                 );
                 await new Promise((r) => setTimeout(r, 1200));
-                if (isPausedRef.current || isCancelledRef.current) return;
+                if (isCancelledRef.current) return;
               }
 
               await uploadChunkWithProgress(
@@ -246,7 +244,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
               completedChunksSetRef.current.add(chunkIndex);
               chunkLoadedMapRef.current.delete(chunkIndex);
             } catch (err) {
-              if (isPausedRef.current || isCancelledRef.current) return;
+              if (isCancelledRef.current) return;
               attempt++;
               if (attempt > 3) {
                 setUpload((prev) =>
@@ -275,7 +273,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     [uploadChunkWithProgress]
   );
 
-  // File Picker Handler (Resumable Concurrent Chunked Upload initialization)
+  // File Picker Handler (Concurrent Chunked Upload initialization)
   const handleFiles = (files: FileList | null) => {
     if (!files || files.length === 0 || !isHost) return;
 
@@ -292,7 +290,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     const fileId = Math.random().toString(36).substring(2, 10) + '_' + Date.now();
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
-    isPausedRef.current = false;
     isCancelledRef.current = false;
     completedChunksSetRef.current.clear();
     chunkLoadedMapRef.current.clear();
@@ -315,57 +312,16 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     uploadChunkLoop(file, fileId, allChunks);
   };
 
-  // Pause in-flight upload
-  const handlePauseUpload = () => {
-    isPausedRef.current = true;
-    activeXhrsRef.current.forEach((xhr) => xhr.abort());
-    activeXhrsRef.current.clear();
-    setUpload((prev) =>
-      prev ? { ...prev, status: 'paused', speed: 0, remainingSeconds: 0 } : null
-    );
-  };
-
-  // Resume paused upload with concurrency
-  const handleResumeUpload = async () => {
+  // Retry failed upload
+  const handleRetryUpload = () => {
     if (!upload) return;
-    isPausedRef.current = false;
     isCancelledRef.current = false;
     setUpload((prev) =>
       prev ? { ...prev, status: 'uploading', errorMessage: null } : null
     );
 
     const totalChunks = Math.ceil(upload.file.size / CHUNK_SIZE);
-    let pendingChunks: number[] = [];
-    try {
-      const res = await fetch(`/api/rooms/${roomId}/upload/status/${upload.fileId}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.completed) {
-          setUpload((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  status: 'completed',
-                  uploadedBytes: upload.totalBytes,
-                  speed: 0,
-                  remainingSeconds: 0,
-                }
-              : null
-          );
-          setTimeout(() => {
-            setUpload(null);
-            if (fileInputRef.current) fileInputRef.current.value = '';
-          }, 2000);
-          return;
-        }
-        if (Array.isArray(data.completedChunks)) {
-          data.completedChunks.forEach((c: number) =>
-            completedChunksSetRef.current.add(c)
-          );
-        }
-      }
-    } catch {}
-
+    const pendingChunks: number[] = [];
     for (let i = 0; i < totalChunks; i++) {
       if (!completedChunksSetRef.current.has(i)) {
         pendingChunks.push(i);
@@ -383,7 +339,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   // Cancel in-flight upload and purge .part file from server disk
   const handleCancelUpload = async () => {
     isCancelledRef.current = true;
-    isPausedRef.current = true;
     activeXhrsRef.current.forEach((xhr) => xhr.abort());
     activeXhrsRef.current.clear();
     completedChunksSetRef.current.clear();
@@ -512,29 +467,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
             </div>
 
             <div className="flex items-center gap-1.5 shrink-0">
-              {upload.status === 'uploading' && (
-                <button
-                  type="button"
-                  onClick={handlePauseUpload}
-                  className="px-2 py-0.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-medium flex items-center gap-1 border border-neutral-700 transition cursor-pointer"
-                  title="Приостановить загрузку"
-                >
-                  <Pause className="w-3 h-3 text-amber-400 fill-current" />
-                  <span>Пауза</span>
-                </button>
-              )}
-
-              {upload.status === 'paused' && (
-                <button
-                  type="button"
-                  onClick={handleResumeUpload}
-                  className="px-2 py-0.5 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 text-xs font-medium flex items-center gap-1 border border-emerald-500/40 transition cursor-pointer"
-                  title="Продолжить загрузку"
-                >
-                  <Play className="w-3 h-3 fill-current" />
-                  <span>Продолжить</span>
-                </button>
-              )}
 
               {upload.status === 'retrying' && (
                 <span className="text-[11px] text-amber-400 font-medium flex items-center gap-1 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
@@ -546,7 +478,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
               {upload.status === 'error' && (
                 <button
                   type="button"
-                  onClick={handleResumeUpload}
+                  onClick={handleRetryUpload}
                   className="px-2 py-0.5 rounded-lg bg-rose-600/30 hover:bg-rose-600/50 text-rose-300 text-xs font-medium flex items-center gap-1 border border-rose-500/40 transition cursor-pointer"
                   title="Повторить попытку"
                 >
@@ -579,10 +511,10 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           <div className="relative w-full h-2 bg-neutral-800 rounded-full overflow-hidden mb-2">
             <div
               className={`h-full rounded-full transition-all duration-150 ${
-                upload.status === 'paused'
-                  ? 'bg-amber-500'
-                  : upload.status === 'error'
+                upload.status === 'error'
                   ? 'bg-rose-600'
+                  : upload.status === 'retrying'
+                  ? 'bg-amber-500'
                   : 'bg-gradient-to-r from-rose-600 via-rose-500 to-amber-500'
               }`}
               style={{
@@ -616,10 +548,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                 <span className="text-neutral-400">
                   ~{formatRemainingTime(upload.remainingSeconds)}
                 </span>
-              )}
-
-              {upload.status === 'paused' && (
-                <span className="text-amber-400 font-medium">На паузе</span>
               )}
             </div>
           </div>
