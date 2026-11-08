@@ -105,7 +105,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [preloadedBlobUrl, setPreloadedBlobUrl] = useState<string | null>(null);
   const [bufferAheadSeconds, setBufferAheadSeconds] = useState(0);
   const preloadControllerRef = useRef<AbortController | null>(null);
-  const isPrefetchingAheadRef = useRef(false);
 
   // Compute maximum 16:9 viewport fit to eliminate dead black space on large screens (WQHD/4K/PC)
   useEffect(() => {
@@ -243,59 +242,33 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   };
 
-  // Proactive 5-minute (300 seconds) forward reserve buffer check (Item 3)
+  // Monitor native browser video buffer without any phantom network requests (Option 1)
   useEffect(() => {
-    if (!videoSourceUrl || isFullyPreloaded) return;
+    if (!videoSourceUrl) return;
 
-    const bufferCheckInterval = setInterval(async () => {
+    const bufferCheckInterval = setInterval(() => {
       const video = videoRef.current;
       if (!video || !duration || duration <= 0) return;
 
-      // Calculate buffer ahead of current playback position
+      if (isFullyPreloaded) {
+        setBufferAheadSeconds(duration);
+        return;
+      }
+
+      // Read native HTMLMediaElement buffer ahead of current playhead
       let ahead = 0;
       const cur = video.currentTime;
       for (let i = 0; i < video.buffered.length; i++) {
         if (video.buffered.start(i) <= cur && cur <= video.buffered.end(i)) {
-          ahead = video.buffered.end(i) - cur;
+          ahead = Math.max(0, video.buffered.end(i) - cur);
           break;
         }
       }
       setBufferAheadSeconds(ahead);
-
-      // Ensure minimum 5 minutes (300 seconds) in reserve
-      const TARGET_RESERVE = 300;
-      if (ahead < TARGET_RESERVE && cur + ahead < duration && !isPrefetchingAheadRef.current) {
-        isPrefetchingAheadRef.current = true;
-        try {
-          const rawUrl = currentTrack?.url;
-          if (!rawUrl) return;
-
-          const totalBytes = currentTrack?.size || duration * 250000;
-          const bitrate = totalBytes / duration;
-
-          const startSec = cur + ahead;
-          const endSec = Math.min(duration, startSec + 60);
-
-          const startByte = Math.floor(startSec * bitrate);
-          const endByte = Math.min(totalBytes - 1, Math.floor(endSec * bitrate));
-
-          if (endByte > startByte) {
-            await fetch(rawUrl, {
-              headers: {
-                Range: `bytes=${startByte}-${endByte}`,
-              },
-            });
-          }
-        } catch {
-          // Ignore prefetch aborts
-        } finally {
-          isPrefetchingAheadRef.current = false;
-        }
-      }
-    }, 3500);
+    }, 1000);
 
     return () => clearInterval(bufferCheckInterval);
-  }, [videoSourceUrl, duration, currentTrack, isFullyPreloaded]);
+  }, [videoSourceUrl, duration, isFullyPreloaded]);
 
   // Track Ended -> Host trigger auto next or pause if last track (Item 1)
   const handleEnded = useCallback(() => {
@@ -974,28 +947,30 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <span>{formatTime(duration)}</span>
             </div>
 
-            {/* 5-Minute Reserve Buffer Badge (Item 3) */}
+            {/* Native Buffer / Cache Indicator */}
             {videoSourceUrl && duration > 0 && (
               <div
                 className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900/90 border border-neutral-700/60 text-[11px] font-mono"
                 title={
                   isFullyPreloaded
-                    ? 'Видео загружено в память браузера (100%)'
-                    : bufferAheadSeconds >= 300
-                    ? `Запас буфера отличный: ${Math.floor(bufferAheadSeconds / 60)} мин ${Math.floor(bufferAheadSeconds % 60)} сек (норма 5+ мин)`
-                    : `Запас буфера: ${Math.floor(bufferAheadSeconds / 60)} мин ${Math.floor(bufferAheadSeconds % 60)} сек (докачка до 5 мин в фоне...)`
+                    ? 'Видео полностью сохранено в памяти браузера (0 сетевых запросов при просмотре)'
+                    : bufferAheadSeconds > 0
+                    ? `Нативный буфер браузера: +${Math.round(bufferAheadSeconds)} сек запаса (HTTP 206 стриминг)`
+                    : 'Потоковое воспроизведение (HTTP 206)'
                 }
               >
-                <span className={isFullyPreloaded || bufferAheadSeconds >= 300 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                <span className={isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
                   ⚡
                 </span>
-                <span className="text-neutral-400">Запас:</span>
-                <span className={isFullyPreloaded || bufferAheadSeconds >= 300 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
+                <span className="text-neutral-400">
+                  {isFullyPreloaded ? 'Кэш:' : 'Буфер:'}
+                </span>
+                <span className={isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
                   {isFullyPreloaded
                     ? '100%'
-                    : bufferAheadSeconds >= 300
-                    ? '5:00+ OK'
-                    : `+${Math.floor(bufferAheadSeconds / 60)}:${Math.floor(bufferAheadSeconds % 60).toString().padStart(2, '0')}`}
+                    : bufferAheadSeconds >= 60
+                    ? `+${Math.floor(bufferAheadSeconds / 60)}:${Math.floor(bufferAheadSeconds % 60).toString().padStart(2, '0')}`
+                    : `+${Math.round(bufferAheadSeconds)}с`}
                 </span>
               </div>
             )}
