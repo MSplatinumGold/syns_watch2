@@ -49,17 +49,44 @@ export default function App() {
 
   useEffect(() => {
     const handleLayoutCheck = () => {
-      const isPortrait = window.matchMedia('(orientation: portrait)').matches || window.innerHeight > window.innerWidth;
+      const isTouch =
+        'ontouchstart' in window ||
+        (typeof navigator !== 'undefined' && (navigator.maxTouchPoints || 0) > 0);
+
+      let isPortrait: boolean;
+      if (isTouch && window.screen?.orientation?.type) {
+        // Physical device hardware orientation - immune to virtual keyboard resizing
+        isPortrait = window.screen.orientation.type.startsWith('portrait');
+      } else if (isTouch && typeof window.orientation === 'number') {
+        isPortrait = window.orientation === 0 || window.orientation === 180;
+      } else if (isTouch && window.screen?.height && window.screen?.width) {
+        // Compare physical screen dimensions (static hardware values)
+        isPortrait = window.screen.height >= window.screen.width;
+      } else {
+        // Desktop window resizing
+        isPortrait = window.innerHeight >= window.innerWidth;
+      }
+
       setOrientation(isPortrait ? 'portrait' : 'landscape');
-      setIsTablet(window.innerWidth < 1024);
+      const effectiveWidth =
+        isTouch && window.screen?.width
+          ? Math.min(window.innerWidth, window.screen.width)
+          : window.innerWidth;
+      setIsTablet(effectiveWidth < 1024);
     };
 
     handleLayoutCheck();
     window.addEventListener('resize', handleLayoutCheck);
     window.addEventListener('orientationchange', handleLayoutCheck);
+    if (window.screen?.orientation) {
+      window.screen.orientation.addEventListener('change', handleLayoutCheck);
+    }
     return () => {
       window.removeEventListener('resize', handleLayoutCheck);
       window.removeEventListener('orientationchange', handleLayoutCheck);
+      if (window.screen?.orientation) {
+        window.screen.orientation.removeEventListener('change', handleLayoutCheck);
+      }
     };
   }, []);
 

@@ -191,7 +191,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             placeholder="Написать в чат..."
             value={text}
             onChange={(e) => setText(e.target.value)}
-            className="flex-1 bg-neutral-900 border border-neutral-700 focus:border-rose-500 text-neutral-200 placeholder-neutral-500 text-xs md:text-sm rounded-xl px-3 py-2 outline-none transition"
+            onFocus={() => {
+              setTimeout(() => {
+                const el = containerRef.current;
+                if (el) el.scrollTop = el.scrollHeight;
+              }, 150);
+            }}
+            className="flex-1 bg-neutral-900 border border-neutral-700 focus:border-rose-500 text-neutral-200 placeholder-neutral-500 text-base sm:text-xs md:text-sm rounded-xl px-3 py-2 outline-none transition"
           />
 
           <button
