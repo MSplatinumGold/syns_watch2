@@ -12,6 +12,7 @@ import type {
   User,
   PlaylistItem,
   ChatMessage,
+  ChatReplyRef,
   ClientToServerEvents,
   ServerToClientEvents,
 } from './src/types/watchparty.ts';
@@ -77,6 +78,123 @@ function decodeOriginalName(rawName: string): string {
     }
   } catch {}
   return rawName;
+}
+
+// Track recent chat message ownership per room for safe deletion & media cleanup (capped at 300 entries)
+const chatMessageRegistry = new Map<string, Map<string, { userId: string; mediaId?: string }>>();
+
+function registerChatMessage(roomId: string, messageId: string, userId: string, mediaId?: string) {
+  let roomMsgs = chatMessageRegistry.get(roomId);
+  if (!roomMsgs) {
+    roomMsgs = new Map();
+    chatMessageRegistry.set(roomId, roomMsgs);
+  }
+  roomMsgs.set(messageId, { userId, mediaId });
+  if (roomMsgs.size > 300) {
+    const oldestKey = roomMsgs.keys().next().value;
+    if (oldestKey) roomMsgs.delete(oldestKey);
+  }
+}
+
+function sanitizeReplyTo(raw: unknown): ChatReplyRef | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.id !== 'string' || typeof r.nickname !== 'string') return undefined;
+  const mediaKind =
+    r.mediaKind === 'image' || r.mediaKind === 'video' || r.mediaKind === 'audio'
+      ? r.mediaKind
+      : undefined;
+  return {
+    id: r.id.slice(0, 64),
+    userId: typeof r.userId === 'string' ? r.userId.slice(0, 64) : '',
+    nickname: r.nickname.trim().slice(0, 24) || 'Участник',
+    text: typeof r.text === 'string' ? r.text.slice(0, 120) : '',
+    hasMedia: Boolean(r.hasMedia),
+    mediaKind,
+  };
+}
+
+const REPLY_ACTION_TEMPLATES: Record<string, (actor: string, target: string) => string> = {
+  поцеловать: (a, t) => `💋 ${a} поцеловал ${t}`,
+  поцелуй: (a, t) => `💋 ${a} поцеловал ${t}`,
+  чмок: (a, t) => `💋 ${a} чмокнул ${t}`,
+  чмокнуть: (a, t) => `💋 ${a} чмокнул ${t}`,
+  обнять: (a, t) => `🫂 ${a} обнял ${t}`,
+  обними: (a, t) => `🫂 ${a} обнял ${t}`,
+  обнимаю: (a, t) => `🫂 ${a} обнял ${t}`,
+  обнимашки: (a, t) => `🫂 ${a} крепко обнял ${t}`,
+  погладить: (a, t) => `🥹 ${a} погладил по голове ${t}`,
+  погладь: (a, t) => `🥹 ${a} погладил по голове ${t}`,
+  глажу: (a, t) => `🥹 ${a} погладил по голове ${t}`,
+  ударить: (a, t) => `💥 ${a} ударил ${t}`,
+  стукнуть: (a, t) => `💥 ${a} стукнул ${t}`,
+  треснуть: (a, t) => `💥 ${a} треснул ${t}`,
+  бонк: (a, t) => `🔨 ${a} бонкнул ${t}`,
+  пнуть: (a, t) => `🦶 ${a} пнул ${t}`,
+  пинок: (a, t) => `🦶 ${a} пнул ${t}`,
+  шлепнуть: (a, t) => `👋 ${a} шлёпнул ${t}`,
+  укусить: (a, t) => `🦷 ${a} укусил ${t}`,
+  кусь: (a, t) => `🦷 ${a} сделал кусь ${t}`,
+  куснуть: (a, t) => `🦷 ${a} укусил ${t}`,
+  лизнуть: (a, t) => `👅 ${a} лизнул ${t}`,
+  лизь: (a, t) => `👅 ${a} лизнул ${t}`,
+  покормить: (a, t) => `🍿 ${a} покормил ${t}`,
+  покорми: (a, t) => `🍿 ${a} покормил ${t}`,
+  'дать пять': (a, t) => `🙌 ${a} дал пять ${t}`,
+  'дай пять': (a, t) => `🙌 ${a} дал пять ${t}`,
+  пятюня: (a, t) => `🙌 ${a} дал пять ${t}`,
+  'пожать руку': (a, t) => `🤝 ${a} пожал руку ${t}`,
+  'жму руку': (a, t) => `🤝 ${a} пожал руку ${t}`,
+  подмигнуть: (a, t) => `😉 ${a} подмигнул ${t}`,
+  улыбнуться: (a, t) => `😊 ${a} улыбнулся ${t}`,
+  похлопать: (a, t) => `👏 ${a} похлопал ${t}`,
+  аплодисменты: (a, t) => `👏 ${a} поаплодировал ${t}`,
+  похвалить: (a, t) => `🌟 ${a} похвалил ${t}`,
+  молодец: (a, t) => `🌟 ${a} похвалил ${t}`,
+  утешить: (a, t) => `❤️‍🩹 ${a} утешил ${t}`,
+  пожалеть: (a, t) => `❤️‍🩹 ${a} пожалел ${t}`,
+  поблагодарить: (a, t) => `🙏 ${a} поблагодарил ${t}`,
+  спасибо: (a, t) => `🙏 ${a} поблагодарил ${t}`,
+  извиниться: (a, t) => `🙇 ${a} извинился перед ${t}`,
+  прости: (a, t) => `🙇 ${a} попросил прощения у ${t}`,
+  извини: (a, t) => `🙇 ${a} извинился перед ${t}`,
+  'подарить цветы': (a, t) => `💐 ${a} подарил цветы ${t}`,
+  цветы: (a, t) => `💐 ${a} подарил цветы ${t}`,
+  чокнуться: (a, t) => `🥂 ${a} чокнулся с ${t}`,
+  выпить: (a, t) => `🥂 ${a} выпил с ${t}`,
+  разбудить: (a, t) => `⏰ ${a} разбудил ${t}`,
+  проснись: (a, t) => `⏰ ${a} разбудил ${t}`,
+  люблю: (a, t) => `❤️ ${a} признался в любви ${t}`,
+};
+
+function buildReplyActionText(actorNick: string, targetNick: string, text: string): string | null {
+  const norm = text
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[.,!?;:()\[\]"'«»~*]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!norm) return null;
+
+  const exactBuilder = REPLY_ACTION_TEMPLATES[norm];
+  if (exactBuilder) {
+    return exactBuilder(actorNick, targetNick);
+  }
+
+  const words = norm.split(' ');
+  if (words.length <= 5) {
+    for (let i = 0; i < words.length - 1; i++) {
+      const bigram = `${words[i]} ${words[i + 1]}`;
+      const bigramBuilder = REPLY_ACTION_TEMPLATES[bigram];
+      if (bigramBuilder) return bigramBuilder(actorNick, targetNick);
+    }
+    for (const w of words) {
+      const wordBuilder = REPLY_ACTION_TEMPLATES[w];
+      if (wordBuilder) return wordBuilder(actorNick, targetNick);
+    }
+  }
+
+  return null;
 }
 
 // Configure multer storage
@@ -202,6 +320,7 @@ function purgeRoom(roomId: string, reason = 'Комната закрыта. Вс
       console.error(`Ошибка при удалении хранилища комнаты ${roomId}:`, err);
     });
 
+  chatMessageRegistry.delete(roomId);
   rooms.delete(roomId);
 }
 
@@ -737,9 +856,16 @@ app.post('/api/rooms/:roomId/chat/upload', (req, res) => {
     else if (file.mimetype.startsWith('audio/')) mediaKind = 'audio';
 
     const captionText = typeof req.body?.text === 'string' ? req.body.text.trim().slice(0, 500) : '';
+    let parsedReplyTo: ChatReplyRef | undefined;
+    if (typeof req.body?.replyTo === 'string' && req.body.replyTo.trim()) {
+      try {
+        parsedReplyTo = sanitizeReplyTo(JSON.parse(req.body.replyTo));
+      } catch {}
+    }
 
+    const messageId = uuidv4();
     const message: ChatMessage = {
-      id: uuidv4(),
+      id: messageId,
       userId: socketId,
       nickname: user.nickname,
       text: captionText,
@@ -754,9 +880,26 @@ app.post('/api/rooms/:roomId/chat/upload', (req, res) => {
         size: file.size,
         mediaKind,
       },
+      replyTo: parsedReplyTo,
     };
 
+    registerChatMessage(roomId, messageId, socketId, mediaId);
     io.to(roomId).emit('chat:message', message);
+
+    if (parsedReplyTo && captionText) {
+      const targetNick = room.users[parsedReplyTo.userId]?.nickname || parsedReplyTo.nickname;
+      const actionText = buildReplyActionText(user.nickname, targetNick, captionText);
+      if (actionText) {
+        io.to(roomId).emit('chat:message', {
+          id: uuidv4(),
+          userId: 'system',
+          nickname: 'Реакция',
+          text: actionText,
+          timestamp: Date.now(),
+          type: 'action',
+        });
+      }
+    }
 
     res.json({
       success: true,
@@ -1331,25 +1474,68 @@ io.on('connection', (socket) => {
   });
 
   // Chat message
-  socket.on('chat:send', ({ text }) => {
+  socket.on('chat:send', ({ text, replyTo }) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
     const user = room.users[socket.id];
-    const cleanText = (text || '').trim();
+    const cleanText = (text || '').trim().slice(0, 500);
     if (!cleanText || !user) return;
 
+    const cleanReplyTo = sanitizeReplyTo(replyTo);
+    const messageId = uuidv4();
     const message: ChatMessage = {
-      id: uuidv4(),
+      id: messageId,
       userId: socket.id,
       nickname: user.nickname,
-      text: cleanText.slice(0, 500),
+      text: cleanText,
       timestamp: Date.now(),
       type: 'message',
+      replyTo: cleanReplyTo,
     };
 
+    registerChatMessage(currentRoomId, messageId, socket.id);
     io.to(currentRoomId).emit('chat:message', message);
+
+    if (cleanReplyTo) {
+      const targetNick = room.users[cleanReplyTo.userId]?.nickname || cleanReplyTo.nickname;
+      const actionText = buildReplyActionText(user.nickname, targetNick, cleanText);
+      if (actionText) {
+        io.to(currentRoomId).emit('chat:message', {
+          id: uuidv4(),
+          userId: 'system',
+          nickname: 'Реакция',
+          text: actionText,
+          timestamp: Date.now(),
+          type: 'action',
+        });
+      }
+    }
+  });
+
+  // Delete own chat message
+  socket.on('chat:delete', ({ messageId }) => {
+    if (!currentRoomId || !messageId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    const roomMsgs = chatMessageRegistry.get(currentRoomId);
+    const entry = roomMsgs?.get(messageId);
+    if (!entry || entry.userId !== socket.id) return;
+
+    roomMsgs!.delete(messageId);
+
+    if (entry.mediaId) {
+      const mediaIdx = room.chatMediaFiles.findIndex((m) => m.id === entry.mediaId);
+      if (mediaIdx !== -1) {
+        const [removed] = room.chatMediaFiles.splice(mediaIdx, 1);
+        room.chatMediaTotalBytes = Math.max(0, room.chatMediaTotalBytes - removed.size);
+        fsPromises.unlink(removed.filePath).catch(() => {});
+      }
+    }
+
+    io.to(currentRoomId).emit('chat:deleted', { messageId });
   });
 
   // Disconnect & Auto Host Migration

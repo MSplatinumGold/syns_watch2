@@ -10,6 +10,7 @@ import type {
   User,
   PlaylistItem,
   ChatMessage,
+  ChatReplyRef,
   DanmakuItem,
   ClientToServerEvents,
   ServerToClientEvents,
@@ -435,7 +436,7 @@ export default function App() {
       setMessages((prev) => [...prev, message]);
 
       // Trigger Danmaku item at the BOTTOM of the screen when there is text
-      if (message.type === 'message' && message.text) {
+      if ((message.type === 'message' || message.type === 'action') && message.text) {
         const danmaku: DanmakuItem = {
           ...message,
           topPercent: 72 + (Math.floor(Math.random() * 3) * 5), // 72%, 77%, 82% (bottom area, clear center)
@@ -455,6 +456,12 @@ export default function App() {
         }
         return currentTab;
       });
+    });
+
+    // Chat message deleted by author
+    socket.on('chat:deleted', ({ messageId }) => {
+      setMessages((prev) => prev.filter((m) => m.id !== messageId));
+      setDanmakuItems((prev) => prev.filter((item) => item.id !== messageId));
     });
 
     // Old chat media deleted due to 100 MB FIFO room limit
@@ -599,8 +606,12 @@ export default function App() {
     socketRef.current?.emit('host:transfer_host', { newHostUserId });
   }, []);
 
-  const handleSendMessage = useCallback((text: string) => {
-    socketRef.current?.emit('chat:send', { text });
+  const handleSendMessage = useCallback((text: string, replyTo?: ChatReplyRef) => {
+    socketRef.current?.emit('chat:send', { text, replyTo });
+  }, []);
+
+  const handleDeleteMessage = useCallback((messageId: string) => {
+    socketRef.current?.emit('chat:delete', { messageId });
   }, []);
 
   const handleProgressReport = useCallback(
@@ -720,6 +731,7 @@ export default function App() {
           roomId={roomId}
           isKeyboardOpen={isKeyboardOpen}
           onSendMessage={handleSendMessage}
+          onDeleteMessage={handleDeleteMessage}
         />
       )}
 

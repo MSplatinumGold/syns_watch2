@@ -12,8 +12,9 @@ import {
   Music,
   Image as ImageIcon,
   Trash2,
+  Reply,
 } from 'lucide-react';
-import type { ChatMessage, User } from '../types/watchparty.ts';
+import type { ChatMessage, ChatReplyRef, User } from '../types/watchparty.ts';
 import { formatBytes } from '../utils/format.ts';
 
 const MAX_CHAT_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB limit per file
@@ -25,7 +26,8 @@ interface ChatPanelProps {
   currentUserId: string;
   roomId: string;
   isKeyboardOpen?: boolean;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, replyTo?: ChatReplyRef) => void;
+  onDeleteMessage: (messageId: string) => void;
 }
 
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
@@ -43,6 +45,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   roomId,
   isKeyboardOpen = false,
   onSendMessage,
+  onDeleteMessage,
 }) => {
   const [text, setText] = useState('');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -51,11 +54,28 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
+  const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
+  const [activeMenuMessageId, setActiveMenuMessageId] = useState<string | null>(null);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const mediaInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isNearBottomRef = useRef(true);
+
+  useEffect(() => {
+    if (!activeMenuMessageId) return;
+    const handleClose = () => setActiveMenuMessageId(null);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActiveMenuMessageId(null);
+    };
+    document.addEventListener('click', handleClose);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('click', handleClose);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [activeMenuMessageId]);
 
   useEffect(() => {
     if (!pendingFile) {
@@ -135,10 +155,46 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     }
   };
 
+  const formatMediaLabel = (mediaKind?: 'image' | 'video' | 'audio') => {
+    if (mediaKind === 'image') return 'Фото';
+    if (mediaKind === 'video') return 'Видео';
+    if (mediaKind === 'audio') return 'Аудио';
+    return 'Медиа';
+  };
+
+  const toReplyRef = (msg: ChatMessage): ChatReplyRef => ({
+    id: msg.id,
+    userId: msg.userId,
+    nickname: msg.nickname,
+    text: msg.text.slice(0, 120),
+    hasMedia: Boolean(msg.media && !msg.media.expired),
+    mediaKind: msg.media?.mediaKind,
+  });
+
+  const startReply = (msg: ChatMessage) => {
+    setReplyingTo(msg);
+    setActiveMenuMessageId(null);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  };
+
+  const scrollToMessage = (messageId: string) => {
+    const el = document.getElementById(`chat-msg-${messageId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightedMessageId(messageId);
+      setTimeout(() => {
+        setHighlightedMessageId((curr) => (curr === messageId ? null : curr));
+      }, 1400);
+    }
+  };
+
   const submitMessage = async () => {
     if (isUploadingMedia) return;
 
     const clean = text.trim();
+    const replyRef = replyingTo ? toReplyRef(replyingTo) : undefined;
 
     if (pendingFile) {
       setIsUploadingMedia(true);
@@ -148,6 +204,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         formData.append('media', pendingFile);
         if (clean) {
           formData.append('text', clean);
+        }
+        if (replyRef) {
+          formData.append('replyTo', JSON.stringify(replyRef));
         }
 
         const res = await fetch(`/api/rooms/${roomId}/chat/upload`, {
@@ -165,6 +224,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
         setPendingFile(null);
         setText('');
+        setReplyingTo(null);
         resetTextareaHeight();
         setShowEmojiPicker(false);
         if (mediaInputRef.current) mediaInputRef.current.value = '';
@@ -177,8 +237,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     }
 
     if (!clean) return;
-    onSendMessage(clean);
+    onSendMessage(clean, replyRef);
     setText('');
+    setReplyingTo(null);
     resetTextareaHeight();
     setShowEmojiPicker(false);
   };
@@ -252,13 +313,27 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               );
             }
 
+            if (msg.type === 'action') {
+              return (
+                <div key={msg.id} className="flex justify-center my-1.5">
+                  <div className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-rose-500/15 via-amber-500/15 to-rose-500/15 border border-rose-500/30 text-rose-100 text-xs font-medium text-center shadow-sm max-w-[92%]">
+                    {msg.text}
+                  </div>
+                </div>
+              );
+            }
+
             const isMe = msg.userId === currentUserId;
             const isMsgHost = msg.userId === hostId;
+            const isHighlighted = highlightedMessageId === msg.id;
 
             return (
               <div
                 key={msg.id}
-                className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+                id={`chat-msg-${msg.id}`}
+                className={`flex flex-col transition-colors duration-300 rounded-xl ${
+                  isMe ? 'items-end' : 'items-start'
+                } ${isHighlighted ? 'bg-rose-500/10 ring-1 ring-rose-500/40 p-1 -m-1' : ''}`}
               >
                 <div className="flex items-center gap-1.5 mb-1 px-1">
                   <span
@@ -279,12 +354,43 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                 </div>
 
                 <div
-                  className={`px-3 py-2 rounded-2xl text-xs md:text-sm max-w-[85%] break-words shadow-sm space-y-1.5 ${
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (isMe) {
+                      setActiveMenuMessageId((prev) => (prev === msg.id ? null : msg.id));
+                    } else {
+                      startReply(msg);
+                    }
+                  }}
+                  title={isMe ? 'Нажмите для действий с сообщением' : 'Нажмите, чтобы ответить'}
+                  className={`px-3 py-2 rounded-2xl text-xs md:text-sm max-w-[85%] break-words shadow-sm space-y-1.5 cursor-pointer active:scale-[0.99] transition select-text ${
                     isMe
-                      ? 'bg-rose-600 text-white rounded-tr-xs'
-                      : 'bg-neutral-800 text-neutral-200 border border-neutral-700/60 rounded-tl-xs'
+                      ? 'bg-rose-600 hover:bg-rose-500/95 text-white rounded-tr-xs'
+                      : 'bg-neutral-800 hover:bg-neutral-700/80 text-neutral-200 border border-neutral-700/60 rounded-tl-xs'
                   }`}
                 >
+                  {msg.replyTo && (
+                    <div
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        scrollToMessage(msg.replyTo!.id);
+                      }}
+                      className={`px-2 py-1 rounded-lg border-l-2 text-[11px] cursor-pointer transition ${
+                        isMe
+                          ? 'bg-black/20 border-white/75 hover:bg-black/30 text-white/95'
+                          : 'bg-neutral-900/80 border-rose-500 hover:bg-neutral-900 text-neutral-300'
+                      }`}
+                    >
+                      <div className="font-semibold truncate">{msg.replyTo.nickname}</div>
+                      <div className="truncate opacity-80">
+                        {msg.replyTo.text ||
+                          (msg.replyTo.hasMedia
+                            ? `[${formatMediaLabel(msg.replyTo.mediaKind)}]`
+                            : 'Сообщение')}
+                      </div>
+                    </div>
+                  )}
+
                   {msg.media && (
                     <div>
                       {msg.media.expired ? (
@@ -297,7 +403,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                           src={msg.media.url}
                           alt={msg.media.originalName}
                           loading="lazy"
-                          onClick={() => setLightboxImageUrl(msg.media!.url)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setLightboxImageUrl(msg.media!.url);
+                          }}
                           className="max-h-60 w-auto max-w-full rounded-xl object-contain bg-black/30 cursor-pointer hover:opacity-95 transition"
                         />
                       ) : msg.media.mediaKind === 'video' ? (
@@ -306,6 +415,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                           controls
                           playsInline
                           preload="metadata"
+                          onClick={(e) => e.stopPropagation()}
                           className="max-h-60 w-full rounded-xl bg-black"
                         />
                       ) : (
@@ -313,6 +423,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                           src={msg.media.url}
                           controls
                           preload="metadata"
+                          onClick={(e) => e.stopPropagation()}
                           className="w-full max-w-[250px]"
                         />
                       )}
@@ -327,6 +438,36 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
                   {msg.text && <p>{msg.text}</p>}
                 </div>
+
+                {/* Own message click context menu (Reply + Delete) */}
+                {isMe && activeMenuMessageId === msg.id && (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="mt-1 flex items-center gap-1 bg-neutral-950 border border-neutral-700/80 rounded-xl p-1 shadow-xl z-30"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => startReply(msg)}
+                      className="px-2.5 py-1 rounded-lg hover:bg-neutral-800 text-[11px] font-medium text-neutral-200 flex items-center gap-1.5 cursor-pointer transition"
+                    >
+                      <Reply className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Ответить</span>
+                    </button>
+                    <div className="w-px h-4 bg-neutral-800" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onDeleteMessage(msg.id);
+                        setActiveMenuMessageId(null);
+                        if (replyingTo?.id === msg.id) setReplyingTo(null);
+                      }}
+                      className="px-2.5 py-1 rounded-lg hover:bg-rose-950/70 text-[11px] font-medium text-rose-400 flex items-center gap-1.5 cursor-pointer transition"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Удалить</span>
+                    </button>
+                  </div>
+                )}
               </div>
             );
           })
@@ -364,6 +505,34 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             : 'p-2 sm:p-3 pb-[max(0.5rem,calc(0.35rem+env(safe-area-inset-bottom)))] bg-neutral-950 border-t border-neutral-800 relative shrink-0 z-20 space-y-1.5'
         }`}
       >
+        {/* Reply target preview */}
+        {replyingTo && (
+          <div className="px-2.5 py-1 rounded-xl bg-neutral-900 border border-neutral-700/80 border-l-2 border-l-rose-500 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Reply className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-rose-400 truncate">
+                  Ответ для {replyingTo.nickname}
+                </div>
+                <div className="text-[11px] text-neutral-400 truncate">
+                  {replyingTo.text ||
+                    (replyingTo.media
+                      ? `[${formatMediaLabel(replyingTo.media.mediaKind)}]`
+                      : 'Сообщение')}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setReplyingTo(null)}
+              className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer shrink-0"
+              title="Отменить ответ"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Media validation / upload error */}
         {mediaError && (
           <div className="px-2.5 py-1.5 rounded-xl bg-rose-950/70 border border-rose-700/50 text-rose-200 text-[11px] flex items-center justify-between gap-2">

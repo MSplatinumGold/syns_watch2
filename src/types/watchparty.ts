@@ -45,14 +45,24 @@ export interface ChatMediaAttachment {
   expired?: boolean;
 }
 
+export interface ChatReplyRef {
+  id: string;
+  userId: string;
+  nickname: string;
+  text: string;
+  hasMedia?: boolean;
+  mediaKind?: 'image' | 'video' | 'audio';
+}
+
 export interface ChatMessage {
   id: string;
   userId: string;
   nickname: string;
   text: string;
   timestamp: number;
-  type: 'message' | 'system';
+  type: 'message' | 'system' | 'action';
   media?: ChatMediaAttachment;
+  replyTo?: ChatReplyRef;
 }
 
 export interface DanmakuItem extends ChatMessage {
@@ -75,7 +85,8 @@ export interface ClientToServerEvents {
   'client:buffering_end': () => void;
   'client:progress': (payload: { currentTime: number }) => void;
   'host:close_room': () => void;
-  'chat:send': (payload: { text: string }) => void;
+  'chat:send': (payload: { text: string; replyTo?: ChatReplyRef }) => void;
+  'chat:delete': (payload: { messageId: string }) => void;
 }
 
 export interface ServerToClientEvents {
@@ -93,6 +104,7 @@ export interface ServerToClientEvents {
   'playlist:updated': (payload: { playlist: PlaylistItem[]; currentTrackIndex: number }) => void;
   'users:progress': (payload: { userId: string; currentTime: number }) => void;
   'chat:message': (message: ChatMessage) => void;
+  'chat:deleted': (payload: { messageId: string }) => void;
   'chat:media_pruned': (payload: { deletedMediaIds: string[] }) => void;
   'room:closed': (payload: { reason: string }) => void;
   'error:notification': (payload: { message: string }) => void;
