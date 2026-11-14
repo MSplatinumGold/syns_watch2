@@ -20,7 +20,7 @@ import { ChatPanel } from './components/ChatPanel.tsx';
 import { PlaylistPanel } from './components/PlaylistPanel.tsx';
 import { ParticipantsPanel } from './components/ParticipantsPanel.tsx';
 import { JoinModal } from './components/JoinModal.tsx';
-import { MessageSquare, Film, Users } from 'lucide-react';
+import { MessageSquare, Film, Users, ChevronUp, ChevronDown, GripHorizontal } from 'lucide-react';
 
 export default function App() {
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -48,6 +48,19 @@ export default function App() {
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('landscape');
   const [isTablet, setIsTablet] = useState(false);
   const [isTheaterMode, setIsTheaterMode] = useState(false);
+  const [clockOffsetMs, setClockOffsetMs] = useState(0);
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const [customViewportHeight, setCustomViewportHeight] = useState<number | null>(null);
+  const [portraitVideoPercent, setPortraitVideoPercent] = useState<number>(30);
+  const [isPortraitVideoCollapsed, setIsPortraitVideoCollapsed] = useState<boolean>(false);
+
+  const bestClockRttRef = useRef<number>(Infinity);
+  const baselineViewportHeightRef = useRef<number>(
+    typeof window !== 'undefined' ? window.innerHeight : 800
+  );
+  const lastOrientationRef = useRef<'portrait' | 'landscape' | null>(null);
+  const portraitMainRef = useRef<HTMLElement>(null);
+  const isResizingChatRef = useRef<boolean>(false);
 
   useEffect(() => {
     const handleLayoutCheck = () => {
@@ -69,26 +82,87 @@ export default function App() {
         isPortrait = window.innerHeight >= window.innerWidth;
       }
 
-      setOrientation(isPortrait ? 'portrait' : 'landscape');
+      const nextOrientation: 'portrait' | 'landscape' = isPortrait ? 'portrait' : 'landscape';
+      setOrientation(nextOrientation);
       const effectiveWidth =
         isTouch && window.screen?.width
           ? Math.min(window.innerWidth, window.screen.width)
           : window.innerWidth;
       setIsTablet(effectiveWidth < 1024);
+
+      const vv = window.visualViewport;
+      const vvHeight = vv ? vv.height : window.innerHeight;
+
+      if (lastOrientationRef.current !== nextOrientation) {
+        lastOrientationRef.current = nextOrientation;
+        baselineViewportHeightRef.current = Math.max(vvHeight, window.innerHeight);
+      } else if (vvHeight > baselineViewportHeightRef.current) {
+        baselineViewportHeightRef.current = vvHeight;
+      }
+
+      if (isTouch && isPortrait) {
+        const kbOpen = vvHeight < baselineViewportHeightRef.current * 0.76;
+        setIsKeyboardOpen(kbOpen);
+        if (kbOpen && vv && vv.height < window.innerHeight - 20) {
+          setCustomViewportHeight(Math.floor(vv.height));
+          if (window.scrollY !== 0) {
+            window.scrollTo(0, 0);
+          }
+        } else {
+          setCustomViewportHeight(null);
+        }
+      } else {
+        setIsKeyboardOpen(false);
+        setCustomViewportHeight(null);
+      }
     };
 
     handleLayoutCheck();
     window.addEventListener('resize', handleLayoutCheck);
     window.addEventListener('orientationchange', handleLayoutCheck);
+    window.visualViewport?.addEventListener('resize', handleLayoutCheck);
+    window.visualViewport?.addEventListener('scroll', handleLayoutCheck);
     if (window.screen?.orientation) {
       window.screen.orientation.addEventListener('change', handleLayoutCheck);
     }
     return () => {
       window.removeEventListener('resize', handleLayoutCheck);
       window.removeEventListener('orientationchange', handleLayoutCheck);
+      window.visualViewport?.removeEventListener('resize', handleLayoutCheck);
+      window.visualViewport?.removeEventListener('scroll', handleLayoutCheck);
       if (window.screen?.orientation) {
         window.screen.orientation.removeEventListener('change', handleLayoutCheck);
       }
+    };
+  }, []);
+
+  // Drag handle resize support for portrait mobile chat/video split
+  useEffect(() => {
+    const handlePointerMove = (e: PointerEvent) => {
+      if (!isResizingChatRef.current || !portraitMainRef.current) return;
+      const rect = portraitMainRef.current.getBoundingClientRect();
+      if (rect.height <= 0) return;
+      const relY = e.clientY - rect.top;
+      const percent = (relY / rect.height) * 100;
+      if (percent < 10) {
+        setIsPortraitVideoCollapsed(true);
+      } else {
+        setIsPortraitVideoCollapsed(false);
+        setPortraitVideoPercent(Math.max(15, Math.min(55, Math.round(percent))));
+      }
+    };
+
+    const handlePointerUp = () => {
+      isResizingChatRef.current = false;
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
     };
   }, []);
 
@@ -121,6 +195,15 @@ export default function App() {
 
     socketRef.current = socket;
 
+    let pingTimeouts: ReturnType<typeof setTimeout>[] = [];
+    let pingInterval: ReturnType<typeof setInterval> | null = null;
+
+    const sendTimePing = () => {
+      if (socket.connected) {
+        socket.emit('sync:time_ping', { clientSentAt: Date.now() });
+      }
+    };
+
     socket.on('connect', () => {
       setIsConnected(true);
       if (socket.id) {
@@ -132,6 +215,29 @@ export default function App() {
         nickname: nicknameRef.current,
         hostToken: hostToken || undefined,
       });
+
+      // Calibrate clock offset against server time (3 quick probes + periodic refresh)
+      bestClockRttRef.current = Infinity;
+      pingTimeouts.forEach(clearTimeout);
+      pingTimeouts = [
+        setTimeout(sendTimePing, 50),
+        setTimeout(sendTimePing, 450),
+        setTimeout(sendTimePing, 950),
+      ];
+      if (pingInterval) clearInterval(pingInterval);
+      pingInterval = setInterval(sendTimePing, 60000);
+    });
+
+    socket.on('sync:time_pong', ({ clientSentAt, serverTime }) => {
+      const receivedAt = Date.now();
+      const rtt = Math.max(0, receivedAt - clientSentAt);
+      if (bestClockRttRef.current === Infinity || rtt <= bestClockRttRef.current * 1.25) {
+        if (rtt < bestClockRttRef.current) {
+          bestClockRttRef.current = rtt;
+        }
+        const estimatedServerNow = serverTime + rtt / 2;
+        setClockOffsetMs(Math.round(estimatedServerNow - receivedAt));
+      }
     });
 
     socket.on('disconnect', () => {
@@ -366,6 +472,8 @@ export default function App() {
     });
 
     return () => {
+      pingTimeouts.forEach(clearTimeout);
+      if (pingInterval) clearInterval(pingInterval);
       socket.disconnect();
       socketRef.current = null;
     };
@@ -604,6 +712,7 @@ export default function App() {
           hostId={roomState?.hostId || ''}
           currentUserId={socketId}
           roomId={roomId}
+          isKeyboardOpen={isKeyboardOpen}
           onSendMessage={handleSendMessage}
         />
       )}
@@ -637,7 +746,10 @@ export default function App() {
   );
 
   return (
-    <div className="h-screen w-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans antialiased overflow-hidden select-none">
+    <div
+      className="h-[100dvh] w-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans antialiased overflow-hidden select-none"
+      style={customViewportHeight ? { height: `${customViewportHeight}px` } : undefined}
+    >
       {/* 1. Header (Navbar): compact and responsive */}
       <Navbar
         roomId={roomId}
@@ -652,15 +764,27 @@ export default function App() {
 
       {/* 2. Responsive Orientation Layout (Item 3) */}
       {isPortraitMode ? (
-        /* TABLET / MOBILE PORTRAIT: Fixed Header -> 16:9 Video across full width -> Tabs -> Full-height Chat without gaps */
-        <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          {/* Fixed 16:9 Video Player full width */}
-          <div className="w-full shrink-0 bg-black">
+        /* TABLET / MOBILE PORTRAIT: Adaptive resizable split + keyboard-aware compact video */
+        <main ref={portraitMainRef} className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          {/* Resizable Video Player container */}
+          <div
+            className={`w-full shrink-0 bg-black overflow-hidden transition-[height] duration-150 ${
+              isPortraitVideoCollapsed || (isKeyboardOpen && !currentTrack) ? 'h-0' : ''
+            }`}
+            style={
+              isPortraitVideoCollapsed || (isKeyboardOpen && !currentTrack)
+                ? { height: '0px' }
+                : isKeyboardOpen
+                ? { height: '88px' }
+                : { height: `${portraitVideoPercent}%` }
+            }
+          >
             <VideoPlayer
               currentTrack={currentTrack}
               playlist={roomState?.playlist || []}
               currentTrackIndex={roomState?.currentTrackIndex || 0}
               isHost={isHost}
+              clockOffsetMs={clockOffsetMs}
               playbackState={
                 roomState?.playbackState || {
                   isPlaying: false,
@@ -683,6 +807,59 @@ export default function App() {
             />
           </div>
 
+          {/* Drag handle & quick resize controls for Chat block */}
+          {!isKeyboardOpen && (
+            <div
+              onPointerDown={(e) => {
+                // Only start drag if user didn't tap the toggle button
+                if ((e.target as HTMLElement).closest('button')) return;
+                isResizingChatRef.current = true;
+              }}
+              className="h-6 bg-neutral-900/95 border-y border-neutral-800/90 flex items-center justify-between px-2 shrink-0 touch-none cursor-row-resize select-none"
+              title="Потяните вверх или вниз, чтобы изменить размер чата"
+            >
+              <span className="text-[10px] text-neutral-500 font-medium">
+                {isPortraitVideoCollapsed ? 'Видео скрыто' : `Экран ${portraitVideoPercent}%`}
+              </span>
+
+              <div className="flex items-center gap-1 text-neutral-500">
+                <GripHorizontal className="w-4 h-4" />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (isPortraitVideoCollapsed) {
+                    setIsPortraitVideoCollapsed(false);
+                    if (portraitVideoPercent < 18) setPortraitVideoPercent(30);
+                  } else if (portraitVideoPercent > 22) {
+                    setPortraitVideoPercent(18);
+                  } else {
+                    setIsPortraitVideoCollapsed(true);
+                  }
+                }}
+                className="px-2 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-[10px] font-medium text-neutral-300 flex items-center gap-1 cursor-pointer"
+              >
+                {isPortraitVideoCollapsed ? (
+                  <>
+                    <ChevronDown className="w-3 h-3 text-rose-400" />
+                    <span>Показать видео</span>
+                  </>
+                ) : portraitVideoPercent > 22 ? (
+                  <>
+                    <ChevronUp className="w-3 h-3 text-amber-400" />
+                    <span>Больше чата</span>
+                  </>
+                ) : (
+                  <>
+                    <ChevronUp className="w-3 h-3 text-rose-400" />
+                    <span>Скрыть видео</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+
           {/* Under video: Tab Navigation */}
           <div className="p-1.5 bg-neutral-950 border-b border-neutral-800 shrink-0">
             {TabNavButtons}
@@ -703,6 +880,7 @@ export default function App() {
               playlist={roomState?.playlist || []}
               currentTrackIndex={roomState?.currentTrackIndex || 0}
               isHost={isHost}
+              clockOffsetMs={clockOffsetMs}
               playbackState={
                 roomState?.playbackState || {
                   isPlaying: false,

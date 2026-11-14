@@ -65,6 +65,20 @@ function getRoomChatMediaDir(roomId: string): string {
   return dir;
 }
 
+// Fix Busboy/Multer latin1 mojibake for UTF-8 Cyrillic/Unicode filenames
+function decodeOriginalName(rawName: string): string {
+  if (!rawName) return 'file';
+  try {
+    if (/[\u0080-\u00ff]/.test(rawName)) {
+      const decoded = Buffer.from(rawName, 'latin1').toString('utf8');
+      if (!decoded.includes('\uFFFD')) {
+        return decoded;
+      }
+    }
+  } catch {}
+  return rawName;
+}
+
 // Configure multer storage
 const storage = multer.diskStorage({
   destination: (req, _file, cb) => {
@@ -326,12 +340,13 @@ app.post('/api/rooms/:roomId/upload', upload.array('videos', 10), (req, res) => 
   const newItems: PlaylistItem[] = [];
 
   for (const file of files) {
-    const ext = path.extname(file.originalname).toLowerCase();
+    const decodedName = decodeOriginalName(file.originalname);
+    const ext = path.extname(decodedName).toLowerCase();
     const isSupported = ['.mp4', '.webm', '.ogg', '.mov'].includes(ext);
 
     const item: PlaylistItem = {
       id: path.basename(file.filename, ext),
-      originalName: file.originalname,
+      originalName: decodedName,
       filename: file.filename,
       size: file.size,
       mimeType: file.mimetype || (ext === '.webm' ? 'video/webm' : 'video/mp4'),
@@ -734,7 +749,7 @@ app.post('/api/rooms/:roomId/chat/upload', (req, res) => {
         id: mediaId,
         url: `/api/rooms/${roomId}/chat/media/${file.filename}`,
         filename: file.filename,
-        originalName: file.originalname,
+        originalName: decodeOriginalName(file.originalname),
         mimeType: file.mimetype,
         size: file.size,
         mediaKind,
@@ -793,9 +808,10 @@ app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');
     const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const rawEnd = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const end = Math.min(isNaN(rawEnd) ? fileSize - 1 : rawEnd, fileSize - 1);
 
-    if (isNaN(start) || start >= fileSize) {
+    if (isNaN(start) || start >= fileSize || end < start) {
       res.status(416).set('Content-Range', `bytes */${fileSize}`).send('Requested range not satisfiable');
       return;
     }
@@ -873,9 +889,10 @@ app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');
     const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const rawEnd = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const end = Math.min(isNaN(rawEnd) ? fileSize - 1 : rawEnd, fileSize - 1);
 
-    if (isNaN(start) || start >= fileSize) {
+    if (isNaN(start) || start >= fileSize || end < start) {
       res.status(416).set('Content-Range', `bytes */${fileSize}`).send('Requested range not satisfiable');
       return;
     }
@@ -924,6 +941,14 @@ app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
 
 io.on('connection', (socket) => {
   let currentRoomId: string | null = null;
+
+  // NTP-style clock skew measurement so PC/mobile clients with unsynced system clocks never loop-seek
+  socket.on('sync:time_ping', ({ clientSentAt }) => {
+    socket.emit('sync:time_pong', {
+      clientSentAt,
+      serverTime: Date.now(),
+    });
+  });
 
   // Join Room
   socket.on('room:join', ({ roomId, nickname, hostToken }) => {

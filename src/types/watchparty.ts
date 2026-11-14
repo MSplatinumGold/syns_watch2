@@ -62,6 +62,7 @@ export interface DanmakuItem extends ChatMessage {
 export interface ClientToServerEvents {
   'room:join': (payload: { roomId: string; nickname: string; hostToken?: string }) => void;
   'user:change_nickname': (payload: { nickname: string }) => void;
+  'sync:time_ping': (payload: { clientSentAt: number }) => void;
   'host:play': (payload: { currentTime: number }) => void;
   'host:pause': (payload: { currentTime: number }) => void;
   'host:seek': (payload: { targetTime: number }) => void;
@@ -83,6 +84,7 @@ export interface ServerToClientEvents {
   'room:user_left': (payload: { userId: string; newHostId?: string }) => void;
   'room:user_updated': (payload: { userId: string; nickname: string }) => void;
   'room:host_changed': (payload: { hostId: string }) => void;
+  'sync:time_pong': (payload: { clientSentAt: number; serverTime: number }) => void;
   'sync:play': (payload: { currentTime: number; serverTimestamp: number }) => void;
   'sync:pause': (payload: { currentTime: number }) => void;
   'sync:seek': (payload: { targetTime: number }) => void;

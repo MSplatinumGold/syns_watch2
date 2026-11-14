@@ -24,6 +24,7 @@ interface ChatPanelProps {
   hostId: string;
   currentUserId: string;
   roomId: string;
+  isKeyboardOpen?: boolean;
   onSendMessage: (text: string) => void;
 }
 
@@ -40,6 +41,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   hostId,
   currentUserId,
   roomId,
+  isKeyboardOpen = false,
   onSendMessage,
 }) => {
   const [text, setText] = useState('');
@@ -52,6 +54,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const mediaInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isNearBottomRef = useRef(true);
 
   useEffect(() => {
@@ -111,7 +114,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setPendingFile(file);
   };
 
-  const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = e.clipboardData?.items;
     if (!items) return;
     for (let i = 0; i < items.length; i++) {
@@ -126,8 +129,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const resetTextareaHeight = () => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+    }
+  };
+
+  const submitMessage = async () => {
     if (isUploadingMedia) return;
 
     const clean = text.trim();
@@ -157,6 +165,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
         setPendingFile(null);
         setText('');
+        resetTextareaHeight();
         setShowEmojiPicker(false);
         if (mediaInputRef.current) mediaInputRef.current.value = '';
       } catch (err: any) {
@@ -170,6 +179,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     if (!clean) return;
     onSendMessage(clean);
     setText('');
+    resetTextareaHeight();
     setShowEmojiPicker(false);
   };
 
@@ -317,8 +327,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         )}
       </div>
 
-      {/* Quick Reaction Emoji Row */}
-      <div className="px-3 py-1.5 bg-neutral-950/80 border-t border-neutral-800/80 flex items-center justify-between gap-1 overflow-x-auto shrink-0">
+      {/* Quick Reaction Emoji Row (hidden when mobile keyboard is open to free vertical space for messages) */}
+      <div
+        className={`px-3 py-1.5 bg-neutral-950/80 border-t border-neutral-800/80 items-center justify-between gap-1 overflow-x-auto shrink-0 ${
+          isKeyboardOpen ? 'hidden sm:flex' : 'flex'
+        }`}
+      >
         <span className="text-[10px] uppercase font-bold tracking-wider text-neutral-500 mr-1 select-none">
           Реакции
         </span>
@@ -337,7 +351,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       </div>
 
       {/* Input Box - strictly fixed in visible screen area */}
-      <div className="p-2.5 sm:p-3 pb-[max(0.625rem,calc(0.5rem+env(safe-area-inset-bottom)))] bg-neutral-950 border-t border-neutral-800 relative shrink-0 z-20 space-y-2">
+      <div className="p-2 sm:p-3 pb-[max(0.5rem,calc(0.35rem+env(safe-area-inset-bottom)))] bg-neutral-950 border-t border-neutral-800 relative shrink-0 z-20 space-y-1.5">
         {/* Media validation / upload error */}
         {mediaError && (
           <div className="px-2.5 py-1.5 rounded-xl bg-rose-950/70 border border-rose-700/50 text-rose-200 text-[11px] flex items-center justify-between gap-2">
@@ -424,7 +438,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           className="hidden"
         />
 
-        <form onSubmit={handleSubmit} className="flex items-center gap-1.5 sm:gap-2">
+        <div className="flex items-end gap-1.5 sm:gap-2">
           <button
             type="button"
             disabled={isUploadingMedia}
@@ -452,11 +466,28 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             <Smile className="w-4 h-4" />
           </button>
 
-          <input
-            type="text"
+          {/* Using textarea instead of form+input prevents Chrome Android Password/Card/Address autofill bar */}
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            name="syncwatch_chat_msg"
+            autoComplete="off"
+            enterKeyHint="send"
+            data-form-type="other"
+            data-lpignore="true"
             placeholder={pendingFile ? 'Подпись (необязательно)...' : 'Написать в чат...'}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              e.target.style.height = 'auto';
+              e.target.style.height = `${Math.min(e.target.scrollHeight, 84)}px`;
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitMessage();
+              }
+            }}
             onPaste={handlePaste}
             onFocus={() => {
               setTimeout(() => {
@@ -464,11 +495,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                 if (el) el.scrollTop = el.scrollHeight;
               }, 150);
             }}
-            className="flex-1 min-w-0 bg-neutral-900 border border-neutral-700 focus:border-rose-500 text-neutral-200 placeholder-neutral-500 text-base sm:text-xs md:text-sm rounded-xl px-3 py-2 outline-none transition"
+            className="flex-1 min-w-0 bg-neutral-900 border border-neutral-700 focus:border-rose-500 text-neutral-200 placeholder-neutral-500 text-base sm:text-xs md:text-sm rounded-xl px-3 py-1.5 sm:py-2 outline-none transition resize-none overflow-y-auto max-h-[84px] leading-snug"
           />
 
           <button
-            type="submit"
+            type="button"
+            onClick={() => submitMessage()}
             disabled={(!text.trim() && !pendingFile) || isUploadingMedia}
             className="p-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:hover:bg-rose-600 text-white transition shadow cursor-pointer shrink-0"
             title="Отправить (Enter)"
@@ -479,7 +511,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               <Send className="w-4 h-4" />
             )}
           </button>
-        </form>
+        </div>
       </div>
     </div>
   );

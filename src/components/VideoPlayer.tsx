@@ -33,6 +33,7 @@ interface VideoPlayerProps {
   bufferingUsers: string[];
   danmakuItems: DanmakuItem[];
   isTheaterMode?: boolean;
+  clockOffsetMs?: number;
   onPlay: (currentTime: number) => void;
   onPause: (currentTime: number) => void;
   onSeek: (targetTime: number) => void;
@@ -54,6 +55,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   bufferingUsers,
   danmakuItems,
   isTheaterMode,
+  clockOffsetMs = 0,
   onPlay,
   onPause,
   onSeek,
@@ -101,7 +103,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isFullyPreloaded, setIsFullyPreloaded] = useState(false);
   const [preloadedBlobUrl, setPreloadedBlobUrl] = useState<string | null>(null);
   const [bufferAheadSeconds, setBufferAheadSeconds] = useState(0);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const preloadControllerRef = useRef<AbortController | null>(null);
+  const clockOffsetRef = useRef(clockOffsetMs);
+  clockOffsetRef.current = clockOffsetMs;
+  const lastHardSeekAtRef = useRef(0);
+
+  const getServerNow = useCallback(() => Date.now() + clockOffsetRef.current, []);
+
+  const safePlay = useCallback((video: HTMLVideoElement) => {
+    video
+      .play()
+      .then(() => {
+        setAutoplayBlocked(false);
+      })
+      .catch((err) => {
+        if (err && err.name === 'NotAllowedError') {
+          setAutoplayBlocked(true);
+        }
+      });
+  }, []);
 
   // Compute maximum 16:9 viewport fit to eliminate dead black space on large screens (WQHD/4K/PC)
   useEffect(() => {
@@ -165,14 +186,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       preloadControllerRef.current.abort();
       preloadControllerRef.current = null;
     }
+    setAutoplayBlocked(false);
     syncAnchorRef.current = {
       currentTime: 0,
-      serverTimestamp: Date.now(),
+      serverTimestamp: getServerNow(),
     };
     if (videoRef.current) {
       videoRef.current.currentTime = 0;
     }
-  }, [currentTrack?.id, currentTrackIndex]);
+  }, [currentTrack?.id, currentTrackIndex, getServerNow]);
 
   // Handler to preload full video in advance into browser memory (Item 2)
   const handlePreloadFullVideo = async () => {
@@ -304,7 +326,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const interval = setInterval(() => {
       const video = videoRef.current;
       if (!video || !videoSourceUrl || video.readyState < 2) return;
-      if (isDraggingSeekRef.current) return; // Don't fight host dragging
+      if (isDraggingSeekRef.current || video.seeking) return; // Never fight host drag or active keyframe seek
 
       const { isPlaying, isSystemPausedForBuffering } = playbackState;
 
@@ -313,23 +335,31 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         if (!video.paused) {
           video.pause();
         }
+        setAutoplayBlocked(false);
         if (playbackRate !== 1.0) setPlaybackRate(1.0);
         return;
       }
 
       // Video should be playing
-      if (video.paused) {
-        video.play().catch(() => {});
+      if (video.paused && !autoplayBlocked) {
+        safePlay(video);
       }
 
-      // Calculate expected time based on server timestamp
-      const elapsedSinceServerUpdate = (Date.now() - syncAnchorRef.current.serverTimestamp) / 1000;
+      // Calculate expected time using clock-offset-corrected server time (fixes PC clock skew 0.0-1.0s loop)
+      const elapsedSinceServerUpdate = Math.max(
+        0,
+        (getServerNow() - syncAnchorRef.current.serverTimestamp) / 1000
+      );
       const expectedTime = Math.max(0, syncAnchorRef.current.currentTime + elapsedSinceServerUpdate);
       const delta = Math.abs(video.currentTime - expectedTime);
 
-      // Hard jump if lag/drift is high (> 1.5s)
+      // Hard jump if lag/drift is high (> 1.5s) with 1.2s cooldown so slow decoders don't stutter-loop
       if (delta > 1.5) {
-        video.currentTime = expectedTime;
+        const now = Date.now();
+        if (now - lastHardSeekAtRef.current > 1200) {
+          lastHardSeekAtRef.current = now;
+          video.currentTime = expectedTime;
+        }
         video.playbackRate = 1.0;
         setPlaybackRate(1.0);
       }
@@ -349,7 +379,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }, 350);
 
     return () => clearInterval(interval);
-  }, [playbackState, videoSourceUrl, playbackRate]);
+  }, [playbackState, videoSourceUrl, playbackRate, autoplayBlocked, getServerNow, safePlay]);
 
   // Direct sync action on playbackState change (immediate pause/play)
   useEffect(() => {
@@ -360,17 +390,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       if (!video.paused) {
         video.pause();
       }
+      setAutoplayBlocked(false);
     } else {
       if (video.paused) {
-        const elapsed = (Date.now() - syncAnchorRef.current.serverTimestamp) / 1000;
-        const target = syncAnchorRef.current.currentTime + elapsed;
+        const elapsed = Math.max(0, (getServerNow() - syncAnchorRef.current.serverTimestamp) / 1000);
+        const target = Math.max(0, syncAnchorRef.current.currentTime + elapsed);
         if (Math.abs(video.currentTime - target) > 0.5) {
+          lastHardSeekAtRef.current = Date.now();
           video.currentTime = target;
         }
-        video.play().catch(() => {});
+        safePlay(video);
       }
     }
-  }, [playbackState.isPlaying, playbackState.isSystemPausedForBuffering, videoSourceUrl]);
+  }, [playbackState.isPlaying, playbackState.isSystemPausedForBuffering, videoSourceUrl, getServerNow, safePlay]);
 
   // Buffer calculation
   const updateBuffer = useCallback(() => {
@@ -414,17 +446,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     video.volume = volume;
     video.muted = isMuted;
 
-    // Apply target start time (defaults to 0:00 on fresh track)
-    if (playbackState.currentTime > 0) {
-      video.currentTime = playbackState.currentTime;
-      setCurrentTime(playbackState.currentTime);
+    // Apply target start time corrected for server elapsed time
+    const elapsed =
+      playbackState.isPlaying && !playbackState.isSystemPausedForBuffering
+        ? Math.max(0, (getServerNow() - syncAnchorRef.current.serverTimestamp) / 1000)
+        : 0;
+    const initialTarget = Math.max(0, syncAnchorRef.current.currentTime + elapsed);
+
+    if (initialTarget > 0) {
+      lastHardSeekAtRef.current = Date.now();
+      video.currentTime = initialTarget;
+      setCurrentTime(initialTarget);
     } else {
       video.currentTime = 0;
       setCurrentTime(0);
     }
 
     if (playbackState.isPlaying && !playbackState.isSystemPausedForBuffering) {
-      video.play().catch(() => {});
+      safePlay(video);
     }
   };
 
@@ -692,28 +731,50 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           }}
         />
       ) : (
-        <div className="flex flex-col items-center justify-center p-6 md:p-10 text-center max-w-xl">
-          <div className="w-16 h-16 rounded-3xl bg-neutral-900 border border-neutral-800 flex items-center justify-center text-rose-500 shadow-xl mb-4">
-            <Film className="w-8 h-8" />
+        <div className="flex flex-col items-center justify-center p-2 sm:p-6 md:p-10 text-center max-w-xl">
+          <div className="w-8 h-8 sm:w-14 sm:h-14 md:w-16 md:h-16 rounded-2xl sm:rounded-3xl bg-neutral-900 border border-neutral-800 flex items-center justify-center text-rose-500 shadow-xl mb-1 sm:mb-4">
+            <Film className="w-4 h-4 sm:w-7 sm:h-7 md:w-8 md:h-8" />
           </div>
-          <h3 className="text-xl md:text-2xl font-bold text-white tracking-tight">Кинозал готов к просмотру</h3>
-          <p className="text-sm text-neutral-400 mt-1.5 mb-6 max-w-md">
+          <h3 className="text-xs sm:text-xl md:text-2xl font-bold text-white tracking-tight">
+            Кинозал готов к просмотру
+          </h3>
+          <p className="hidden sm:block text-xs sm:text-sm text-neutral-400 mt-1.5 mb-5 max-w-md">
             {isHost
               ? 'Загрузите видеофайл с устройства, чтобы начать совместный просмотр'
               : 'Ожидание, пока хост запустит видеофайл или добавит фильм в плейлист...'}
           </p>
 
           {isHost && onTriggerUpload && (
-            <div className="flex flex-wrap items-center justify-center gap-2.5 w-full">
+            <div className="mt-2 sm:mt-0 flex flex-wrap items-center justify-center gap-2.5 w-full">
               <button
                 onClick={onTriggerUpload}
-                className="px-4 py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs md:text-sm font-semibold flex items-center gap-2 shadow-lg shadow-rose-600/30 transition transform active:scale-95 cursor-pointer"
+                className="px-3 py-1.5 sm:px-4 sm:py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs md:text-sm font-semibold flex items-center gap-1.5 sm:gap-2 shadow-lg shadow-rose-600/30 transition transform active:scale-95 cursor-pointer"
               >
-                <UploadCloud className="w-4 h-4" />
+                <UploadCloud className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                 <span>Выбрать видеофайл</span>
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Autoplay Blocked Fallback Overlay */}
+      {autoplayBlocked && videoSourceUrl && playbackState.isPlaying && !playbackState.isSystemPausedForBuffering && (
+        <div className="absolute inset-0 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center z-30">
+          <button
+            type="button"
+            onClick={() => {
+              const video = videoRef.current;
+              if (!video) return;
+              const elapsed = Math.max(0, (getServerNow() - syncAnchorRef.current.serverTimestamp) / 1000);
+              video.currentTime = Math.max(0, syncAnchorRef.current.currentTime + elapsed);
+              safePlay(video);
+            }}
+            className="px-4 py-2.5 sm:px-5 sm:py-3 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs sm:text-sm shadow-2xl shadow-rose-600/40 flex items-center gap-2 cursor-pointer animate-pulse"
+          >
+            <Volume2 className="w-4 h-4 sm:w-5 sm:h-5" />
+            <span>Нажмите, чтобы включить звук и синхронизироваться</span>
+          </button>
         </div>
       )}
 
@@ -791,7 +852,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       {/* Top Header Overlay with Title & Danmaku Toggle */}
       <div
-        className={`absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/80 via-black/30 to-transparent flex items-center justify-between z-20 transition-opacity duration-300 ${
+        className={`absolute top-0 left-0 right-0 p-2 sm:p-4 bg-gradient-to-b from-black/80 via-black/30 to-transparent flex items-center justify-between z-20 transition-opacity duration-300 ${
           showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
@@ -820,7 +881,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       </div>
 
-      {/* Main Bottom Controls */}
+      {/* Main Bottom Controls (only when a video is loaded) */}
+      {videoSourceUrl && (
       <div
         className={`absolute bottom-0 left-0 right-0 p-3 md:p-4 bg-gradient-to-t from-black/95 via-black/70 to-transparent z-20 flex flex-col gap-2 transition-opacity duration-300 ${
           showControls || !playbackState.isPlaying || isDraggingSeekRef.current
@@ -1074,6 +1136,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         </div>
       </div>
+      )}
     </div>
     </div>
   );
