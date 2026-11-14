@@ -304,9 +304,16 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         ) : (
           messages.map((msg) => {
             if (msg.type === 'system') {
+              const isMultiline = msg.text.includes('\n');
               return (
-                <div key={msg.id} className="text-center my-2">
-                  <span className="inline-block px-2.5 py-1 rounded-full bg-neutral-800/80 border border-neutral-700/50 text-[11px] text-neutral-400 font-medium">
+                <div key={msg.id} className={isMultiline ? 'flex justify-center my-2' : 'text-center my-2'}>
+                  <span
+                    className={`inline-block bg-neutral-800/90 border border-neutral-700/60 font-medium ${
+                      isMultiline
+                        ? 'px-3.5 py-2.5 rounded-2xl text-xs text-neutral-200 text-left whitespace-pre-line max-w-[94%] leading-relaxed shadow-sm'
+                        : 'px-2.5 py-1 rounded-full text-[11px] text-neutral-400'
+                    }`}
+                  >
                     {msg.text}
                   </span>
                 </div>

@@ -167,6 +167,22 @@ const REPLY_ACTION_TEMPLATES: Record<string, (actor: string, target: string) => 
   люблю: (a, t) => `❤️ ${a} признался в любви ${t}`,
 };
 
+const HELP_TRIGGERS_TEXT = [
+  '📖 Слова-триггеры (нажмите на сообщение участника и ответьте):',
+  '💋 поцеловать, поцелуй, чмок, чмокнуть',
+  '🫂 обнять, обними, обнимаю, обнимашки',
+  '🥹 погладить, погладь, глажу',
+  '💥 ударить, стукнуть, треснуть, бонк',
+  '🦶 пнуть, пинок  •  👋 шлепнуть',
+  '🦷 укусить, кусь, куснуть  •  👅 лизнуть, лизь',
+  '🍿 покормить, покорми  •  💐 подарить цветы, цветы',
+  '🙌 дать пять, дай пять, пятюня  •  🤝 пожать руку, жму руку',
+  '😉 подмигнуть  •  😊 улыбнуться  •  👏 похлопать, аплодисменты',
+  '🌟 похвалить, молодец  •  ❤️‍🩹 утешить, пожалеть',
+  '🙏 поблагодарить, спасибо  •  🙇 извиниться, прости, извини',
+  '🥂 чокнуться, выпить  •  ⏰ разбудить, проснись  •  ❤️ люблю',
+].join('\n');
+
 function buildReplyActionText(actorNick: string, targetNick: string, text: string): string | null {
   const norm = text
     .toLowerCase()
@@ -1482,6 +1498,18 @@ io.on('connection', (socket) => {
     const user = room.users[socket.id];
     const cleanText = (text || '').trim().slice(0, 500);
     if (!cleanText || !user) return;
+
+    if (cleanText.toLowerCase() === '/help') {
+      socket.emit('chat:message', {
+        id: uuidv4(),
+        userId: 'system',
+        nickname: 'Система',
+        text: HELP_TRIGGERS_TEXT,
+        timestamp: Date.now(),
+        type: 'system',
+      });
+      return;
+    }
 
     const cleanReplyTo = sanitizeReplyTo(replyTo);
     const messageId = uuidv4();
