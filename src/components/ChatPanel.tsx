@@ -197,7 +197,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   };
 
   return (
-    <div className="flex flex-col h-full bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-xl min-h-0">
+    <div
+      className={`flex flex-col bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-xl min-h-0 ${
+        isKeyboardOpen ? 'shrink-0' : 'h-full'
+      }`}
+    >
       {/* Image Lightbox Modal */}
       {lightboxImageUrl && (
         <div
@@ -220,11 +224,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         </div>
       )}
 
-      {/* Messages Feed */}
+      {/* Messages Feed (collapsed when mobile keyboard is open so video stays visible) */}
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-2.5 overscroll-contain"
+        className={`min-h-0 overflow-y-auto p-3.5 space-y-2.5 overscroll-contain ${
+          isKeyboardOpen ? 'hidden' : 'flex-1'
+        }`}
       >
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-6 text-neutral-500">
@@ -327,10 +333,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         )}
       </div>
 
-      {/* Quick Reaction Emoji Row (hidden when mobile keyboard is open to free vertical space for messages) */}
+      {/* Quick Reaction Emoji Row (hidden when mobile keyboard is open) */}
       <div
         className={`px-3 py-1.5 bg-neutral-950/80 border-t border-neutral-800/80 items-center justify-between gap-1 overflow-x-auto shrink-0 ${
-          isKeyboardOpen ? 'hidden sm:flex' : 'flex'
+          isKeyboardOpen ? 'hidden' : 'flex'
         }`}
       >
         <span className="text-[10px] uppercase font-bold tracking-wider text-neutral-500 mr-1 select-none">
@@ -351,7 +357,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       </div>
 
       {/* Input Box - strictly fixed in visible screen area */}
-      <div className="p-2 sm:p-3 pb-[max(0.5rem,calc(0.35rem+env(safe-area-inset-bottom)))] bg-neutral-950 border-t border-neutral-800 relative shrink-0 z-20 space-y-1.5">
+      <div
+        className={`${
+          isKeyboardOpen
+            ? 'p-1.5 bg-neutral-950 relative shrink-0 z-20 space-y-1'
+            : 'p-2 sm:p-3 pb-[max(0.5rem,calc(0.35rem+env(safe-area-inset-bottom)))] bg-neutral-950 border-t border-neutral-800 relative shrink-0 z-20 space-y-1.5'
+        }`}
+      >
         {/* Media validation / upload error */}
         {mediaError && (
           <div className="px-2.5 py-1.5 rounded-xl bg-rose-950/70 border border-rose-700/50 text-rose-200 text-[11px] flex items-center justify-between gap-2">

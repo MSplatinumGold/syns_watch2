@@ -101,10 +101,14 @@ export default function App() {
       }
 
       if (isTouch && isPortrait) {
-        const kbOpen = vvHeight < baselineViewportHeightRef.current * 0.76;
+        const kbOpen = vvHeight < baselineViewportHeightRef.current * 0.78;
         setIsKeyboardOpen(kbOpen);
-        if (kbOpen && vv && vv.height < window.innerHeight - 20) {
-          setCustomViewportHeight(Math.floor(vv.height));
+        if (kbOpen) {
+          if (vv && vv.height < window.innerHeight - 20) {
+            setCustomViewportHeight(Math.floor(vv.height));
+          } else {
+            setCustomViewportHeight(null);
+          }
           if (window.scrollY !== 0) {
             window.scrollTo(0, 0);
           }
@@ -702,9 +706,11 @@ export default function App() {
     </div>
   );
 
+  const isTypingInPortraitChat = isPortraitMode && isKeyboardOpen && activeTab === 'chat';
+
   // Tab panel content component
   const TabContent = (
-    <div className="flex-1 min-h-0 overflow-hidden">
+    <div className={isTypingInPortraitChat ? 'shrink-0' : 'flex-1 min-h-0 overflow-hidden'}>
       {activeTab === 'chat' && (
         <ChatPanel
           messages={messages}
@@ -764,18 +770,22 @@ export default function App() {
 
       {/* 2. Responsive Orientation Layout (Item 3) */}
       {isPortraitMode ? (
-        /* TABLET / MOBILE PORTRAIT: Adaptive resizable split + keyboard-aware compact video */
+        /* TABLET / MOBILE PORTRAIT: Adaptive resizable split + video-first typing mode */
         <main ref={portraitMainRef} className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          {/* Resizable Video Player container */}
+          {/* Resizable Video Player container (expands to fill space while typing so video stays clearly visible) */}
           <div
-            className={`w-full shrink-0 bg-black overflow-hidden transition-[height] duration-150 ${
-              isPortraitVideoCollapsed || (isKeyboardOpen && !currentTrack) ? 'h-0' : ''
+            className={`w-full bg-black overflow-hidden transition-[height] duration-150 ${
+              isTypingInPortraitChat
+                ? 'flex-1 min-h-0'
+                : isPortraitVideoCollapsed
+                ? 'shrink-0 h-0'
+                : 'shrink-0'
             }`}
             style={
-              isPortraitVideoCollapsed || (isKeyboardOpen && !currentTrack)
+              isTypingInPortraitChat
+                ? undefined
+                : isPortraitVideoCollapsed
                 ? { height: '0px' }
-                : isKeyboardOpen
-                ? { height: '88px' }
                 : { height: `${portraitVideoPercent}%` }
             }
           >
@@ -860,13 +870,21 @@ export default function App() {
             </div>
           )}
 
-          {/* Under video: Tab Navigation */}
-          <div className="p-1.5 bg-neutral-950 border-b border-neutral-800 shrink-0">
-            {TabNavButtons}
-          </div>
+          {/* Under video: Tab Navigation (hidden while typing in chat so video gets maximum area) */}
+          {!isTypingInPortraitChat && (
+            <div className="p-1.5 bg-neutral-950 border-b border-neutral-800 shrink-0">
+              {TabNavButtons}
+            </div>
+          )}
 
-          {/* Chat / Tab takes ALL remaining height without page scrolling */}
-          <div className="flex-1 min-h-0 p-1.5 flex flex-col overflow-hidden">
+          {/* Chat / Tab takes remaining space normally, or shrinks to only the input bar while typing */}
+          <div
+            className={
+              isTypingInPortraitChat
+                ? 'shrink-0 p-1.5 flex flex-col'
+                : 'flex-1 min-h-0 p-1.5 flex flex-col overflow-hidden'
+            }
+          >
             {TabContent}
           </div>
         </main>
