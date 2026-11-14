@@ -82,6 +82,10 @@ function decodeOriginalName(rawName: string): string {
 
 // Track recent chat message ownership per room for safe deletion & media cleanup (capped at 300 entries)
 const chatMessageRegistry = new Map<string, Map<string, { userId: string; mediaId?: string }>>();
+// Track active floating emojis per room (hard limit: 5 concurrent active emojis per room)
+const roomFloatingEmojis = new Map<string, number[]>();
+const MAX_ROOM_FLOATING_EMOJIS = 5;
+const FLOATING_EMOJI_TTL_MS = 2400;
 
 function registerChatMessage(roomId: string, messageId: string, userId: string, mediaId?: string) {
   let roomMsgs = chatMessageRegistry.get(roomId);
@@ -337,6 +341,7 @@ function purgeRoom(roomId: string, reason = 'Комната закрыта. Вс
     });
 
   chatMessageRegistry.delete(roomId);
+  roomFloatingEmojis.delete(roomId);
   rooms.delete(roomId);
 }
 
@@ -884,6 +889,7 @@ app.post('/api/rooms/:roomId/chat/upload', (req, res) => {
       id: messageId,
       userId: socketId,
       nickname: user.nickname,
+      prefix: user.prefix,
       text: captionText,
       timestamp: Date.now(),
       type: 'message',
@@ -1210,6 +1216,44 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Set or clear a prefix for any participant in the room (not restricted to host)
+  socket.on('user:set_prefix', ({ targetUserId, prefix }) => {
+    if (!currentRoomId || !targetUserId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    const actor = room.users[socket.id];
+    const target = room.users[targetUserId];
+    if (!actor || !target) return;
+
+    const cleanPrefix = (prefix || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 18);
+    if ((target.prefix || '') === cleanPrefix) return;
+
+    target.prefix = cleanPrefix || undefined;
+
+    io.to(currentRoomId).emit('room:user_prefix_updated', {
+      userId: targetUserId,
+      prefix: cleanPrefix,
+    });
+
+    const noticeText = cleanPrefix
+      ? actor.id === target.id
+        ? `🏷️ ${actor.nickname} установил(а) себе префикс [${cleanPrefix}]`
+        : `🏷️ ${actor.nickname} выдал(а) префикс [${cleanPrefix}] для ${target.nickname}`
+      : actor.id === target.id
+      ? `🏷️ ${actor.nickname} убрал(а) свой префикс`
+      : `🏷️ ${actor.nickname} убрал(а) префикс у ${target.nickname}`;
+
+    io.to(currentRoomId).emit('chat:message', {
+      id: uuidv4(),
+      userId: 'system',
+      nickname: 'Система',
+      text: noticeText,
+      timestamp: Date.now(),
+      type: 'system',
+    });
+  });
+
   // Host: Play
   socket.on('host:play', ({ currentTime }) => {
     if (!currentRoomId) return;
@@ -1517,6 +1561,7 @@ io.on('connection', (socket) => {
       id: messageId,
       userId: socket.id,
       nickname: user.nickname,
+      prefix: user.prefix,
       text: cleanText,
       timestamp: Date.now(),
       type: 'message',
@@ -1564,6 +1609,50 @@ io.on('connection', (socket) => {
     }
 
     io.to(currentRoomId).emit('chat:deleted', { messageId });
+  });
+
+  // Typing indicator broadcast (excludes sender)
+  socket.on('chat:typing', ({ isTyping }) => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+    const user = room.users[socket.id];
+    if (!user) return;
+
+    socket.to(currentRoomId).emit('chat:typing', {
+      userId: socket.id,
+      nickname: user.nickname,
+      isTyping: Boolean(isTyping),
+    });
+  });
+
+  // Floating small emoji over video (max 5 active per room)
+  socket.on('chat:floating_emoji', ({ emoji }) => {
+    if (!currentRoomId || typeof emoji !== 'string') return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+    const user = room.users[socket.id];
+    if (!user) return;
+
+    const cleanEmoji = emoji.trim().slice(0, 12);
+    if (!cleanEmoji) return;
+
+    const now = Date.now();
+    const active = (roomFloatingEmojis.get(currentRoomId) || []).filter((exp) => exp > now);
+    if (active.length >= MAX_ROOM_FLOATING_EMOJIS) {
+      roomFloatingEmojis.set(currentRoomId, active);
+      return;
+    }
+
+    active.push(now + FLOATING_EMOJI_TTL_MS);
+    roomFloatingEmojis.set(currentRoomId, active);
+
+    io.to(currentRoomId).emit('chat:floating_emoji', {
+      id: uuidv4(),
+      emoji: cleanEmoji,
+      nickname: user.nickname,
+      xPercent: 72 + Math.random() * 20,
+    });
   });
 
   // Disconnect & Auto Host Migration

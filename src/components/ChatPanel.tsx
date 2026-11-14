@@ -13,11 +13,19 @@ import {
   Image as ImageIcon,
   Trash2,
   Reply,
+  Clock,
 } from 'lucide-react';
 import type { ChatMessage, ChatReplyRef, User } from '../types/watchparty.ts';
-import { formatBytes } from '../utils/format.ts';
+import { formatBytes, parseTime } from '../utils/format.ts';
 
 const MAX_CHAT_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB limit per file
+
+const CUTE_QUICK_ACTIONS = [
+  { label: '💋 Поцеловать', word: 'поцеловать' },
+  { label: '🫂 Обнять', word: 'обнять' },
+  { label: '🥹 Погладить', word: 'погладить' },
+  { label: '❤️ Люблю', word: 'люблю' },
+];
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -25,9 +33,14 @@ interface ChatPanelProps {
   hostId: string;
   currentUserId: string;
   roomId: string;
+  isHost?: boolean;
   isKeyboardOpen?: boolean;
+  typingNicknames?: string[];
   onSendMessage: (text: string, replyTo?: ChatReplyRef) => void;
   onDeleteMessage: (messageId: string) => void;
+  onTypingChange?: (isTyping: boolean) => void;
+  onSendFloatingEmoji?: (emoji: string) => void;
+  onSeekToTimecode?: (seconds: number) => void;
 }
 
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
@@ -40,12 +53,18 @@ const EXTENDED_EMOJIS = [
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
   messages,
+  users,
   hostId,
   currentUserId,
   roomId,
+  isHost = false,
   isKeyboardOpen = false,
+  typingNicknames = [],
   onSendMessage,
   onDeleteMessage,
+  onTypingChange,
+  onSendFloatingEmoji,
+  onSeekToTimecode,
 }) => {
   const [text, setText] = useState('');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -62,6 +81,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const mediaInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isNearBottomRef = useRef(true);
+  const lastTypingEmitAtRef = useRef<number>(0);
 
   useEffect(() => {
     if (!activeMenuMessageId) return;
@@ -227,6 +247,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         setReplyingTo(null);
         resetTextareaHeight();
         setShowEmojiPicker(false);
+        lastTypingEmitAtRef.current = 0;
+        onTypingChange?.(false);
         if (mediaInputRef.current) mediaInputRef.current.value = '';
       } catch (err: any) {
         setMediaError(err?.message || 'Ошибка отправки медиафайла');
@@ -242,10 +264,61 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setReplyingTo(null);
     resetTextareaHeight();
     setShowEmojiPicker(false);
+    lastTypingEmitAtRef.current = 0;
+    onTypingChange?.(false);
+  };
+
+  const handleQuickAction = (word: string) => {
+    if (!replyingTo) return;
+    onSendMessage(word, toReplyRef(replyingTo));
+    setReplyingTo(null);
   };
 
   const handleQuickEmoji = (emoji: string) => {
-    onSendMessage(emoji);
+    if (onSendFloatingEmoji) {
+      onSendFloatingEmoji(emoji);
+    } else {
+      onSendMessage(emoji);
+    }
+  };
+
+  const renderMessageTextWithTimecodes = (msgText: string, isMe: boolean) => {
+    const parts = msgText.split(/(\b(?:\d{1,2}:)?[0-5]?\d:[0-5]\d\b)/g);
+    if (parts.length === 1) return msgText;
+
+    return parts.map((part, idx) => {
+      if (idx % 2 === 1) {
+        const seconds = parseTime(part);
+        if (seconds !== null) {
+          return (
+            <button
+              key={idx}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (isHost && onSeekToTimecode) {
+                  onSeekToTimecode(seconds);
+                }
+              }}
+              title={
+                isHost
+                  ? `Перемотать видео на ${part} (для всех)`
+                  : `Таймкод ${part} (перемотать может хост)`
+              }
+              className={`inline-flex items-center gap-0.5 px-1.5 py-0.2 mx-0.5 rounded font-mono text-[11px] font-semibold align-baseline border transition ${
+                isMe
+                  ? 'bg-black/25 border-white/40 text-amber-200 hover:bg-black/40'
+                  : 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25'
+              } ${isHost ? 'cursor-pointer' : 'cursor-default'}`}
+            >
+              <Clock className="w-2.5 h-2.5 inline shrink-0" />
+              <span>{part}</span>
+            </button>
+          );
+        }
+      }
+      return <React.Fragment key={idx}>{part}</React.Fragment>;
+    });
   };
 
   const handleInsertEmoji = (emoji: string) => {
@@ -333,6 +406,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             const isMe = msg.userId === currentUserId;
             const isMsgHost = msg.userId === hostId;
             const isHighlighted = highlightedMessageId === msg.id;
+            const userPrefix = users[msg.userId]?.prefix ?? msg.prefix;
 
             return (
               <div
@@ -342,7 +416,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   isMe ? 'items-end' : 'items-start'
                 } ${isHighlighted ? 'bg-rose-500/10 ring-1 ring-rose-500/40 p-1 -m-1' : ''}`}
               >
-                <div className="flex items-center gap-1.5 mb-1 px-1">
+                <div className="flex items-center flex-wrap gap-1.5 mb-1 px-1">
+                  {userPrefix && (
+                    <span className="px-1.5 py-0.2 rounded bg-fuchsia-500/20 border border-fuchsia-400/40 text-fuchsia-300 text-[10px] font-semibold leading-tight max-w-[110px] truncate">
+                      {userPrefix}
+                    </span>
+                  )}
                   <span
                     className={`text-[11px] font-semibold flex items-center gap-1 ${
                       isMsgHost
@@ -443,7 +522,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                     </div>
                   )}
 
-                  {msg.text && <p>{msg.text}</p>}
+                  {msg.text && <p>{renderMessageTextWithTimecodes(msg.text, isMe)}</p>}
                 </div>
 
                 {/* Own message click context menu (Reply + Delete) */}
@@ -481,14 +560,30 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         )}
       </div>
 
-      {/* Quick Reaction Emoji Row (hidden when mobile keyboard is open) */}
+      {/* Typing indicator */}
+      {typingNicknames.length > 0 && !isKeyboardOpen && (
+        <div className="px-3 py-1 bg-neutral-900/90 border-t border-neutral-800/70 text-[11px] text-neutral-400 flex items-center gap-1.5 shrink-0">
+          <span className="inline-flex gap-0.5">
+            <span className="w-1 h-1 rounded-full bg-rose-400 animate-bounce [animation-delay:0ms]" />
+            <span className="w-1 h-1 rounded-full bg-rose-400 animate-bounce [animation-delay:150ms]" />
+            <span className="w-1 h-1 rounded-full bg-rose-400 animate-bounce [animation-delay:300ms]" />
+          </span>
+          <span className="truncate">
+            {typingNicknames.length === 1
+              ? `${typingNicknames[0]} печатает...`
+              : `${typingNicknames.slice(0, 2).join(', ')} печатают...`}
+          </span>
+        </div>
+      )}
+
+      {/* Quick Floating Emoji Row (hidden when mobile keyboard is open) */}
       <div
         className={`px-3 py-1.5 bg-neutral-950/80 border-t border-neutral-800/80 items-center justify-between gap-1 overflow-x-auto shrink-0 ${
           isKeyboardOpen ? 'hidden' : 'flex'
         }`}
       >
         <span className="text-[10px] uppercase font-bold tracking-wider text-neutral-500 mr-1 select-none">
-          Реакции
+          Эмоции
         </span>
         <div className="flex items-center gap-1">
           {QUICK_EMOJIS.map((emoji) => (
@@ -496,7 +591,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               key={emoji}
               onClick={() => handleQuickEmoji(emoji)}
               className="w-7 h-7 rounded-lg hover:bg-neutral-800 active:scale-110 transition flex items-center justify-center text-sm cursor-pointer select-none"
-              title={`Отправить ${emoji}`}
+              title={`Запустить ${emoji} поверх видео`}
             >
               {emoji}
             </button>
@@ -512,31 +607,45 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             : 'p-2 sm:p-3 pb-[max(0.5rem,calc(0.35rem+env(safe-area-inset-bottom)))] bg-neutral-950 border-t border-neutral-800 relative shrink-0 z-20 space-y-1.5'
         }`}
       >
-        {/* Reply target preview */}
+        {/* Reply target preview + 4 cute quick RP buttons */}
         {replyingTo && (
-          <div className="px-2.5 py-1 rounded-xl bg-neutral-900 border border-neutral-700/80 border-l-2 border-l-rose-500 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <Reply className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-              <div className="min-w-0">
-                <div className="text-[11px] font-semibold text-rose-400 truncate">
-                  Ответ для {replyingTo.nickname}
-                </div>
-                <div className="text-[11px] text-neutral-400 truncate">
-                  {replyingTo.text ||
-                    (replyingTo.media
-                      ? `[${formatMediaLabel(replyingTo.media.mediaKind)}]`
-                      : 'Сообщение')}
+          <div className="rounded-xl bg-neutral-900 border border-neutral-700/80 border-l-2 border-l-rose-500 overflow-hidden">
+            <div className="px-2.5 py-1 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Reply className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold text-rose-400 truncate">
+                    Ответ для {replyingTo.nickname}
+                  </div>
+                  <div className="text-[11px] text-neutral-400 truncate">
+                    {replyingTo.text ||
+                      (replyingTo.media
+                        ? `[${formatMediaLabel(replyingTo.media.mediaKind)}]`
+                        : 'Сообщение')}
+                  </div>
                 </div>
               </div>
+              <button
+                type="button"
+                onClick={() => setReplyingTo(null)}
+                className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer shrink-0"
+                title="Отменить ответ"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setReplyingTo(null)}
-              className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer shrink-0"
-              title="Отменить ответ"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+            <div className="px-2 pb-1.5 flex items-center gap-1 overflow-x-auto">
+              {CUTE_QUICK_ACTIONS.map((act) => (
+                <button
+                  key={act.word}
+                  type="button"
+                  onClick={() => handleQuickAction(act.word)}
+                  className="px-2 py-0.5 rounded-lg bg-neutral-800 hover:bg-rose-600/30 border border-neutral-700/80 hover:border-rose-500/50 text-[11px] font-medium text-neutral-200 whitespace-nowrap transition active:scale-95 cursor-pointer shrink-0"
+                >
+                  {act.label}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
@@ -666,9 +775,23 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             placeholder={pendingFile ? 'Подпись (необязательно)...' : 'Написать в чат...'}
             value={text}
             onChange={(e) => {
-              setText(e.target.value);
+              const nextVal = e.target.value;
+              setText(nextVal);
               e.target.style.height = 'auto';
               e.target.style.height = `${Math.min(e.target.scrollHeight, 84)}px`;
+
+              if (onTypingChange) {
+                const now = Date.now();
+                if (nextVal.trim().length > 0) {
+                  if (now - lastTypingEmitAtRef.current > 2000) {
+                    lastTypingEmitAtRef.current = now;
+                    onTypingChange(true);
+                  }
+                } else {
+                  lastTypingEmitAtRef.current = 0;
+                  onTypingChange(false);
+                }
+              }
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {

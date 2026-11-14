@@ -1,6 +1,7 @@
 export interface User {
   id: string;          // Socket.id
   nickname: string;
+  prefix?: string;
   isHost: boolean;
   isBuffering: boolean;
   joinedAt: number;
@@ -58,6 +59,7 @@ export interface ChatMessage {
   id: string;
   userId: string;
   nickname: string;
+  prefix?: string;
   text: string;
   timestamp: number;
   type: 'message' | 'system' | 'action';
@@ -69,9 +71,17 @@ export interface DanmakuItem extends ChatMessage {
   topPercent: number; // For floating danmaku position
 }
 
+export interface FloatingEmojiItem {
+  id: string;
+  emoji: string;
+  nickname: string;
+  xPercent: number;
+}
+
 export interface ClientToServerEvents {
   'room:join': (payload: { roomId: string; nickname: string; hostToken?: string }) => void;
   'user:change_nickname': (payload: { nickname: string }) => void;
+  'user:set_prefix': (payload: { targetUserId: string; prefix: string }) => void;
   'sync:time_ping': (payload: { clientSentAt: number }) => void;
   'host:play': (payload: { currentTime: number }) => void;
   'host:pause': (payload: { currentTime: number }) => void;
@@ -87,6 +97,8 @@ export interface ClientToServerEvents {
   'host:close_room': () => void;
   'chat:send': (payload: { text: string; replyTo?: ChatReplyRef }) => void;
   'chat:delete': (payload: { messageId: string }) => void;
+  'chat:typing': (payload: { isTyping: boolean }) => void;
+  'chat:floating_emoji': (payload: { emoji: string }) => void;
 }
 
 export interface ServerToClientEvents {
@@ -94,6 +106,7 @@ export interface ServerToClientEvents {
   'room:user_joined': (user: User) => void;
   'room:user_left': (payload: { userId: string; newHostId?: string }) => void;
   'room:user_updated': (payload: { userId: string; nickname: string }) => void;
+  'room:user_prefix_updated': (payload: { userId: string; prefix: string }) => void;
   'room:host_changed': (payload: { hostId: string }) => void;
   'sync:time_pong': (payload: { clientSentAt: number; serverTime: number }) => void;
   'sync:play': (payload: { currentTime: number; serverTimestamp: number }) => void;
@@ -105,6 +118,8 @@ export interface ServerToClientEvents {
   'users:progress': (payload: { userId: string; currentTime: number }) => void;
   'chat:message': (message: ChatMessage) => void;
   'chat:deleted': (payload: { messageId: string }) => void;
+  'chat:typing': (payload: { userId: string; nickname: string; isTyping: boolean }) => void;
+  'chat:floating_emoji': (item: FloatingEmojiItem) => void;
   'chat:media_pruned': (payload: { deletedMediaIds: string[] }) => void;
   'room:closed': (payload: { reason: string }) => void;
   'error:notification': (payload: { message: string }) => void;

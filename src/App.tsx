@@ -12,6 +12,7 @@ import type {
   ChatMessage,
   ChatReplyRef,
   DanmakuItem,
+  FloatingEmojiItem,
   ClientToServerEvents,
   ServerToClientEvents,
 } from './types/watchparty.ts';
@@ -38,6 +39,8 @@ export default function App() {
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [danmakuItems, setDanmakuItems] = useState<DanmakuItem[]>([]);
+  const [floatingEmojis, setFloatingEmojis] = useState<FloatingEmojiItem[]>([]);
+  const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
   const [bufferingUsers, setBufferingUsers] = useState<string[]>([]);
 
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
@@ -278,6 +281,12 @@ export default function App() {
 
     // User left
     socket.on('room:user_left', ({ userId, newHostId }) => {
+      setTypingUsers((prev) => {
+        if (!prev[userId]) return prev;
+        const next = { ...prev };
+        delete next[userId];
+        return next;
+      });
       setRoomState((prev) => {
         if (!prev) return prev;
         const newUsers = { ...prev.users };
@@ -301,6 +310,23 @@ export default function App() {
             [userId]: {
               ...prev.users[userId],
               nickname: updatedNick,
+            },
+          },
+        };
+      });
+    });
+
+    // User prefix updated (by any room participant)
+    socket.on('room:user_prefix_updated', ({ userId, prefix }) => {
+      setRoomState((prev) => {
+        if (!prev || !prev.users[userId]) return prev;
+        return {
+          ...prev,
+          users: {
+            ...prev.users,
+            [userId]: {
+              ...prev.users[userId],
+              prefix: prefix || undefined,
             },
           },
         };
@@ -431,9 +457,24 @@ export default function App() {
       });
     });
 
+    const typingTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+
     // Chat message received
     socket.on('chat:message', (message: ChatMessage) => {
       setMessages((prev) => [...prev, message]);
+
+      if (message.type === 'message') {
+        if (typingTimers[message.userId]) {
+          clearTimeout(typingTimers[message.userId]);
+          delete typingTimers[message.userId];
+        }
+        setTypingUsers((prev) => {
+          if (!prev[message.userId]) return prev;
+          const next = { ...prev };
+          delete next[message.userId];
+          return next;
+        });
+      }
 
       // Trigger Danmaku item at the BOTTOM of the screen when there is text
       if ((message.type === 'message' || message.type === 'action') && message.text) {
@@ -464,6 +505,42 @@ export default function App() {
       setDanmakuItems((prev) => prev.filter((item) => item.id !== messageId));
     });
 
+    // Typing indicator
+    socket.on('chat:typing', ({ userId, nickname: typerNick, isTyping }) => {
+      if (typingTimers[userId]) {
+        clearTimeout(typingTimers[userId]);
+        delete typingTimers[userId];
+      }
+      if (!isTyping) {
+        setTypingUsers((prev) => {
+          if (!prev[userId]) return prev;
+          const next = { ...prev };
+          delete next[userId];
+          return next;
+        });
+        return;
+      }
+
+      setTypingUsers((prev) => ({ ...prev, [userId]: typerNick }));
+      typingTimers[userId] = setTimeout(() => {
+        delete typingTimers[userId];
+        setTypingUsers((prev) => {
+          if (!prev[userId]) return prev;
+          const next = { ...prev };
+          delete next[userId];
+          return next;
+        });
+      }, 3500);
+    });
+
+    // Small floating emoji reaction over video (max 5 active per room)
+    socket.on('chat:floating_emoji', (item: FloatingEmojiItem) => {
+      setFloatingEmojis((prev) => [...prev, item].slice(-5));
+      setTimeout(() => {
+        setFloatingEmojis((prev) => prev.filter((f) => f.id !== item.id));
+      }, 2500);
+    });
+
     // Old chat media deleted due to 100 MB FIFO room limit
     socket.on('chat:media_pruned', ({ deletedMediaIds }) => {
       const deletedSet = new Set(deletedMediaIds);
@@ -485,6 +562,7 @@ export default function App() {
     return () => {
       pingTimeouts.forEach(clearTimeout);
       if (pingInterval) clearInterval(pingInterval);
+      Object.values(typingTimers).forEach(clearTimeout);
       socket.disconnect();
       socketRef.current = null;
     };
@@ -614,6 +692,14 @@ export default function App() {
     socketRef.current?.emit('chat:delete', { messageId });
   }, []);
 
+  const handleTypingChange = useCallback((isTyping: boolean) => {
+    socketRef.current?.emit('chat:typing', { isTyping });
+  }, []);
+
+  const handleSendFloatingEmoji = useCallback((emoji: string) => {
+    socketRef.current?.emit('chat:floating_emoji', { emoji });
+  }, []);
+
   const handleProgressReport = useCallback(
     (time: number) => {
       socketRef.current?.emit('client:progress', { currentTime: time });
@@ -645,6 +731,10 @@ export default function App() {
     },
     []
   );
+
+  const handleSetUserPrefix = useCallback((targetUserId: string, prefix: string) => {
+    socketRef.current?.emit('user:set_prefix', { targetUserId, prefix });
+  }, []);
 
   // Not in room -> Show Join/Create Modal
   if (!roomId || !nickname) {
@@ -729,9 +819,14 @@ export default function App() {
           hostId={roomState?.hostId || ''}
           currentUserId={socketId}
           roomId={roomId}
+          isHost={isHost}
           isKeyboardOpen={isKeyboardOpen}
+          typingNicknames={Object.values(typingUsers)}
           onSendMessage={handleSendMessage}
           onDeleteMessage={handleDeleteMessage}
+          onTypingChange={handleTypingChange}
+          onSendFloatingEmoji={handleSendFloatingEmoji}
+          onSeekToTimecode={handleSeek}
         />
       )}
 
@@ -758,6 +853,7 @@ export default function App() {
           roomId={roomId}
           hostCurrentTime={roomState?.playbackState.currentTime || 0}
           onTransferHost={handleTransferHost}
+          onSetUserPrefix={handleSetUserPrefix}
         />
       )}
     </div>
@@ -817,6 +913,7 @@ export default function App() {
               }
               bufferingUsers={bufferingUsers}
               danmakuItems={danmakuItems}
+              floatingEmojis={floatingEmojis}
               onPlay={handlePlay}
               onPause={handlePause}
               onSeek={handleSeek}
@@ -921,6 +1018,7 @@ export default function App() {
               }
               bufferingUsers={bufferingUsers}
               danmakuItems={danmakuItems}
+              floatingEmojis={floatingEmojis}
               isTheaterMode={isTheaterMode}
               onPlay={handlePlay}
               onPause={handlePause}

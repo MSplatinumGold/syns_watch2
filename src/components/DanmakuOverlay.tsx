@@ -1,5 +1,5 @@
 import React from 'react';
-import type { DanmakuItem } from '../types/watchparty.ts';
+import type { DanmakuItem, FloatingEmojiItem } from '../types/watchparty.ts';
 
 interface DanmakuOverlayProps {
   items: DanmakuItem[];
@@ -21,6 +21,26 @@ export const DanmakuOverlay: React.FC<DanmakuOverlayProps> = ({ items, enabled }
         >
           <span className="text-amber-400 font-semibold">{item.nickname}:</span>
           <span>{item.text}</span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+export const FloatingEmojisOverlay: React.FC<{ items: FloatingEmojiItem[] }> = ({ items }) => {
+  if (items.length === 0) return null;
+
+  return (
+    <div className="absolute inset-0 pointer-events-none overflow-hidden z-20">
+      {items.map((item) => (
+        <div
+          key={item.id}
+          className="absolute bottom-12 animate-float-emoji select-none drop-shadow-[0_2px_6px_rgba(0,0,0,0.85)] text-lg sm:text-xl leading-none"
+          style={{
+            left: `${item.xPercent}%`,
+          }}
+        >
+          {item.emoji}
         </div>
       ))}
     </div>

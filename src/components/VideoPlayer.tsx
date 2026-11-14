@@ -20,9 +20,14 @@ import {
   Download,
   CheckCircle2,
 } from 'lucide-react';
-import type { PlaylistItem, RoomPlaybackState, DanmakuItem } from '../types/watchparty.ts';
+import type {
+  PlaylistItem,
+  RoomPlaybackState,
+  DanmakuItem,
+  FloatingEmojiItem,
+} from '../types/watchparty.ts';
 import { formatTime, parseTime } from '../utils/format.ts';
-import { DanmakuOverlay } from './DanmakuOverlay.tsx';
+import { DanmakuOverlay, FloatingEmojisOverlay } from './DanmakuOverlay.tsx';
 
 interface VideoPlayerProps {
   currentTrack: PlaylistItem | undefined;
@@ -32,6 +37,7 @@ interface VideoPlayerProps {
   playbackState: RoomPlaybackState;
   bufferingUsers: string[];
   danmakuItems: DanmakuItem[];
+  floatingEmojis?: FloatingEmojiItem[];
   isTheaterMode?: boolean;
   clockOffsetMs?: number;
   onPlay: (currentTime: number) => void;
@@ -54,6 +60,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   playbackState,
   bufferingUsers,
   danmakuItems,
+  floatingEmojis = [],
   isTheaterMode,
   clockOffsetMs = 0,
   onPlay,
@@ -381,7 +388,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return () => clearInterval(interval);
   }, [playbackState, videoSourceUrl, playbackRate, autoplayBlocked, getServerNow, safePlay]);
 
-  // Direct sync action on playbackState change (immediate pause/play)
+  // Direct sync action on playbackState change (immediate pause/play/seek)
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !videoSourceUrl || isDraggingSeekRef.current) return;
@@ -391,18 +398,34 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         video.pause();
       }
       setAutoplayBlocked(false);
+      if (Math.abs(video.currentTime - playbackState.currentTime) > 0.5 && video.readyState >= 1) {
+        lastHardSeekAtRef.current = Date.now();
+        video.currentTime = playbackState.currentTime;
+        setCurrentTime(playbackState.currentTime);
+      }
     } else {
+      const elapsed = Math.max(0, (getServerNow() - syncAnchorRef.current.serverTimestamp) / 1000);
+      const target = Math.max(0, syncAnchorRef.current.currentTime + elapsed);
       if (video.paused) {
-        const elapsed = Math.max(0, (getServerNow() - syncAnchorRef.current.serverTimestamp) / 1000);
-        const target = Math.max(0, syncAnchorRef.current.currentTime + elapsed);
         if (Math.abs(video.currentTime - target) > 0.5) {
           lastHardSeekAtRef.current = Date.now();
           video.currentTime = target;
         }
         safePlay(video);
+      } else if (Math.abs(video.currentTime - target) > 1.5 && video.readyState >= 1) {
+        lastHardSeekAtRef.current = Date.now();
+        video.currentTime = target;
       }
     }
-  }, [playbackState.isPlaying, playbackState.isSystemPausedForBuffering, videoSourceUrl, getServerNow, safePlay]);
+  }, [
+    playbackState.isPlaying,
+    playbackState.isSystemPausedForBuffering,
+    playbackState.currentTime,
+    playbackState.lastUpdatedServerTime,
+    videoSourceUrl,
+    getServerNow,
+    safePlay,
+  ]);
 
   // Buffer calculation
   const updateBuffer = useCallback(() => {
@@ -778,8 +801,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
-      {/* Danmaku Overlays (positioned along bottom area) */}
+      {/* Danmaku & Floating Emojis Overlays */}
       <DanmakuOverlay items={danmakuItems} enabled={danmakuEnabled} />
+      <FloatingEmojisOverlay items={floatingEmojis} />
 
       {/* Error state */}
       {videoError && (
