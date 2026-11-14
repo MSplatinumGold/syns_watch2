@@ -40,6 +40,8 @@ export default function App() {
   const [bufferingUsers, setBufferingUsers] = useState<string[]>([]);
 
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
+  const nicknameRef = useRef<string>('');
+  nicknameRef.current = nickname;
 
   // Check initial query parameter ?room=...
   const [initialUrlRoomId, setInitialUrlRoomId] = useState<string | undefined>(undefined);
@@ -104,9 +106,11 @@ export default function App() {
     }
   }, []);
 
-  // Initialize socket connection when roomId and nickname are present
+  const hasNickname = Boolean(nickname);
+
+  // Initialize socket connection when roomId and initial nickname are present
   useEffect(() => {
-    if (!roomId || !nickname) return;
+    if (!roomId || !hasNickname) return;
 
     // Connect to server (using current host)
     const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io({
@@ -122,10 +126,10 @@ export default function App() {
       if (socket.id) {
         setSocketId(socket.id);
       }
-      // Emit room:join
+      // Emit room:join using latest nicknameRef so in-lobby nick changes never reconnect
       socket.emit('room:join', {
         roomId,
-        nickname,
+        nickname: nicknameRef.current,
         hostToken: hostToken || undefined,
       });
     });
@@ -171,6 +175,23 @@ export default function App() {
           ...prev,
           hostId: newHostId || prev.hostId,
           users: newUsers,
+        };
+      });
+    });
+
+    // User nickname updated in lobby
+    socket.on('room:user_updated', ({ userId, nickname: updatedNick }) => {
+      setRoomState((prev) => {
+        if (!prev || !prev.users[userId]) return prev;
+        return {
+          ...prev,
+          users: {
+            ...prev.users,
+            [userId]: {
+              ...prev.users[userId],
+              nickname: updatedNick,
+            },
+          },
         };
       });
     });
@@ -303,8 +324,8 @@ export default function App() {
     socket.on('chat:message', (message: ChatMessage) => {
       setMessages((prev) => [...prev, message]);
 
-      // If message is a user message, trigger Danmaku item at the BOTTOM of the screen
-      if (message.type === 'message') {
+      // Trigger Danmaku item at the BOTTOM of the screen when there is text
+      if (message.type === 'message' && message.text) {
         const danmaku: DanmakuItem = {
           ...message,
           topPercent: 72 + (Math.floor(Math.random() * 3) * 5), // 72%, 77%, 82% (bottom area, clear center)
@@ -326,6 +347,18 @@ export default function App() {
       });
     });
 
+    // Old chat media deleted due to 100 MB FIFO room limit
+    socket.on('chat:media_pruned', ({ deletedMediaIds }) => {
+      const deletedSet = new Set(deletedMediaIds);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.media && deletedSet.has(m.media.id)
+            ? { ...m, media: { ...m.media, expired: true } }
+            : m
+        )
+      );
+    });
+
     // Room closed by host or empty (Item 4)
     socket.on('room:closed', ({ reason }) => {
       alert(reason || 'Комната была закрыта. Все файлы и данные удалены.');
@@ -336,7 +369,7 @@ export default function App() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [roomId, nickname, hostToken]);
+  }, [roomId, hasNickname, hostToken]);
 
   // Create room flow via HTTP API
   const handleCreateRoom = async (nick: string) => {
@@ -480,24 +513,14 @@ export default function App() {
     [socketId]
   );
 
-  const handleAddDemo = useCallback(
-    async (sampleName: string, sampleUrl: string) => {
-      if (!isHost || !roomId) return;
-      try {
-        await fetch(`/api/rooms/${roomId}/add-sample`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-host-token': hostToken,
-            'x-socket-id': socketId,
-          },
-          body: JSON.stringify({ sampleName, sampleUrl }),
-        });
-      } catch (err) {
-        console.error('Failed to add sample:', err);
-      }
+  const handleChangeNickname = useCallback(
+    (newNick: string) => {
+      const clean = newNick.trim().slice(0, 24);
+      if (!clean || clean === nicknameRef.current) return;
+      setNickname(clean);
+      socketRef.current?.emit('user:change_nickname', { nickname: clean });
     },
-    [isHost, roomId, hostToken, socketId]
+    []
   );
 
   // Not in room -> Show Join/Create Modal
@@ -580,6 +603,7 @@ export default function App() {
           users={roomState?.users || {}}
           hostId={roomState?.hostId || ''}
           currentUserId={socketId}
+          roomId={roomId}
           onSendMessage={handleSendMessage}
         />
       )}
@@ -621,6 +645,7 @@ export default function App() {
         nickname={nickname}
         userCount={userCount}
         isConnected={isConnected}
+        onChangeNickname={handleChangeNickname}
         onLeaveRoom={handleLeaveRoom}
         onCloseRoom={handleCloseRoom}
       />
@@ -655,7 +680,6 @@ export default function App() {
               onTrackEnded={handleTrackEnded}
               onProgressReport={handleProgressReport}
               onTriggerUpload={() => setActiveTab('playlist')}
-              onAddDemo={handleAddDemo}
             />
           </div>
 
@@ -699,7 +723,6 @@ export default function App() {
               onTrackEnded={handleTrackEnded}
               onProgressReport={handleProgressReport}
               onTriggerUpload={() => setActiveTab('playlist')}
-              onAddDemo={handleAddDemo}
               onToggleTheater={() => setIsTheaterMode((prev) => !prev)}
             />
           </section>

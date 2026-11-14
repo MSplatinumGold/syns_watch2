@@ -9,7 +9,6 @@ import {
   Zap,
   Clock,
   MessageSquare,
-  Sparkles,
   Loader2,
   Film,
   AlertCircle,
@@ -43,7 +42,6 @@ interface VideoPlayerProps {
   onTrackEnded: () => void;
   onProgressReport?: (currentTime: number) => void;
   onTriggerUpload?: () => void;
-  onAddDemo?: (name: string, url: string) => void;
   onToggleTheater?: () => void;
 }
 
@@ -65,7 +63,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onTrackEnded,
   onProgressReport,
   onTriggerUpload,
-  onAddDemo,
   onToggleTheater,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -399,9 +396,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
     updateBuffer();
 
-    // Report progress to other users every ~1 second (Item 4)
+    // Report progress to other users every ~2 seconds to save WebSocket traffic
     const now = Date.now();
-    if (now - lastProgressReportRef.current > 1000 && onProgressReport) {
+    if (now - lastProgressReportRef.current > 2000 && onProgressReport) {
       lastProgressReportRef.current = now;
       onProgressReport(video.currentTime);
     }
@@ -702,50 +699,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           <h3 className="text-xl md:text-2xl font-bold text-white tracking-tight">Кинозал готов к просмотру</h3>
           <p className="text-sm text-neutral-400 mt-1.5 mb-6 max-w-md">
             {isHost
-              ? 'Загрузите свой фильм или запустите один из готовых тестовых клипов в 1 клик'
+              ? 'Загрузите видеофайл с устройства, чтобы начать совместный просмотр'
               : 'Ожидание, пока хост запустит видеофайл или добавит фильм в плейлист...'}
           </p>
 
-          {isHost && (
+          {isHost && onTriggerUpload && (
             <div className="flex flex-wrap items-center justify-center gap-2.5 w-full">
-              {onTriggerUpload && (
-                <button
-                  onClick={onTriggerUpload}
-                  className="px-4 py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs md:text-sm font-semibold flex items-center gap-2 shadow-lg shadow-rose-600/30 transition transform active:scale-95 cursor-pointer"
-                >
-                  <UploadCloud className="w-4 h-4" />
-                  <span>Выбрать видеофайл</span>
-                </button>
-              )}
-
-              {onAddDemo && (
-                <>
-                  <button
-                    onClick={() =>
-                      onAddDemo(
-                        'Big Buck Bunny (HD Demo)',
-                        'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
-                      )
-                    }
-                    className="px-4 py-2.5 bg-neutral-900 hover:bg-neutral-850 text-amber-300 border border-amber-500/30 hover:border-amber-500/60 rounded-xl text-xs md:text-sm font-semibold flex items-center gap-2 transition cursor-pointer"
-                  >
-                    <Sparkles className="w-4 h-4 text-amber-400" />
-                    <span>Демо: Big Buck Bunny</span>
-                  </button>
-
-                  <button
-                    onClick={() =>
-                      onAddDemo(
-                        'Tears of Steel (Sci-Fi Demo)',
-                        'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4'
-                      )
-                    }
-                    className="px-3.5 py-2.5 bg-neutral-900 hover:bg-neutral-850 text-neutral-300 border border-neutral-700 hover:border-neutral-500 rounded-xl text-xs md:text-sm font-medium flex items-center gap-2 transition cursor-pointer"
-                  >
-                    <span>+ Tears of Steel</span>
-                  </button>
-                </>
-              )}
+              <button
+                onClick={onTriggerUpload}
+                className="px-4 py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs md:text-sm font-semibold flex items-center gap-2 shadow-lg shadow-rose-600/30 transition transform active:scale-95 cursor-pointer"
+              >
+                <UploadCloud className="w-4 h-4" />
+                <span>Выбрать видеофайл</span>
+              </button>
             </div>
           )}
         </div>

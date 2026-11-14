@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Film, Copy, Check, Users, Crown, LogOut, Radio } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Film, Copy, Check, Users, Crown, LogOut, Radio, Settings, X, Trash2 } from 'lucide-react';
 
 interface NavbarProps {
   roomId: string;
@@ -7,6 +7,7 @@ interface NavbarProps {
   nickname: string;
   userCount: number;
   isConnected: boolean;
+  onChangeNickname: (newNickname: string) => void;
   onLeaveRoom: () => void;
   onCloseRoom: () => void;
 }
@@ -17,11 +18,34 @@ export const Navbar: React.FC<NavbarProps> = ({
   nickname,
   userCount,
   isConnected,
+  onChangeNickname,
   onLeaveRoom,
   onCloseRoom,
 }) => {
   const [copied, setCopied] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  const [nickInput, setNickInput] = useState(nickname);
+  const [nickSaved, setNickSaved] = useState(false);
+  const settingsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setNickInput(nickname);
+  }, [nickname]);
+
+  useEffect(() => {
+    if (!showSettings) {
+      setShowCloseConfirm(false);
+      return;
+    }
+    const handleClickOutside = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+        setShowSettings(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showSettings]);
 
   const handleCopyLink = () => {
     const inviteUrl = `${window.location.origin}?room=${roomId}`;
@@ -30,8 +54,20 @@ export const Navbar: React.FC<NavbarProps> = ({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleSaveNickname = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = nickInput.trim().slice(0, 24);
+    if (!clean) return;
+    if (clean !== nickname) {
+      onChangeNickname(clean);
+    }
+    setNickSaved(true);
+    setTimeout(() => setNickSaved(false), 1800);
+  };
+
   const handleConfirmClose = () => {
     setShowCloseConfirm(false);
+    setShowSettings(false);
     onCloseRoom();
   };
 
@@ -51,7 +87,7 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="flex items-center gap-1.5">
         <div className="flex items-center bg-neutral-900 border border-neutral-800 rounded-full pl-2.5 pr-1 py-0.5 md:py-1">
           <div className="flex items-center gap-1.5 text-xs font-mono text-neutral-300">
-            <Radio className="w-3 h-3 text-rose-500 animate-pulse" />
+            <Radio className={`w-3 h-3 ${isConnected ? 'text-rose-500 animate-pulse' : 'text-neutral-500'}`} />
             <span className="text-neutral-500 hidden sm:inline">ID:</span>
             <strong className="text-white tracking-wider uppercase text-[11px] md:text-xs">{roomId}</strong>
           </div>
@@ -69,7 +105,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
       </div>
 
-      {/* Right: User Info & Controls */}
+      {/* Right: User Info & Settings Button */}
       <div className="flex items-center gap-2">
         {/* Role Badge */}
         <div
@@ -89,50 +125,121 @@ export const Navbar: React.FC<NavbarProps> = ({
           <span className="font-mono text-white text-[11px]">{userCount}</span>
         </div>
 
-        {/* Host: Close Room Button (Item 4: Purges all files & room data) */}
-        {isHost ? (
-          <div className="relative">
-            <button
-              onClick={() => setShowCloseConfirm(!showCloseConfirm)}
-              className="px-2 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 border border-rose-800/60 text-rose-300 hover:text-white text-xs font-medium transition cursor-pointer flex items-center gap-1"
-              title="Закрыть комнату и удалить все данные"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span className="hidden md:inline">Закрыть комнату</span>
-            </button>
+        {/* Settings Menu (replaces Exit/Close button) */}
+        <div className="relative" ref={settingsRef}>
+          <button
+            onClick={() => {
+              setNickInput(nickname);
+              setShowSettings((prev) => !prev);
+            }}
+            className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium transition cursor-pointer flex items-center gap-1.5 ${
+              showSettings
+                ? 'bg-neutral-800 border-neutral-600 text-white'
+                : 'bg-neutral-900 hover:bg-neutral-800 border-neutral-800 text-neutral-300 hover:text-white'
+            }`}
+            title="Настройки"
+          >
+            <Settings className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">Настройки</span>
+          </button>
 
-            {showCloseConfirm && (
-              <div className="absolute right-0 top-full mt-2 w-64 p-3 bg-neutral-900 border border-rose-600/40 rounded-xl shadow-2xl z-50 text-left">
-                <p className="text-xs text-white font-semibold">Закрыть комнату?</p>
-                <p className="text-[11px] text-neutral-400 mt-1">
-                  Все участники будут отключены, а загруженные видеофайлы безвозвратно удалены.
-                </p>
-                <div className="mt-2.5 flex items-center gap-2">
+          {showSettings && (
+            <div className="absolute right-0 top-full mt-2 w-72 p-3.5 bg-neutral-900 border border-neutral-700/80 rounded-2xl shadow-2xl z-50 text-left space-y-3.5">
+              <div className="flex items-center justify-between pb-2 border-b border-neutral-800">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                  <Settings className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Настройки</span>
+                </div>
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white transition cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* In-Lobby Nickname Change */}
+              <form onSubmit={handleSaveNickname} className="space-y-1.5">
+                <label className="block text-[11px] font-medium text-neutral-400">
+                  Сменить никнейм в лобби
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    maxLength={24}
+                    value={nickInput}
+                    onChange={(e) => setNickInput(e.target.value)}
+                    placeholder="Ваш ник..."
+                    className="flex-1 min-w-0 bg-neutral-950 border border-neutral-700 focus:border-rose-500 text-white text-xs rounded-lg px-2.5 py-1.5 outline-none transition"
+                  />
                   <button
-                    onClick={handleConfirmClose}
-                    className="flex-1 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold transition cursor-pointer"
+                    type="submit"
+                    disabled={!nickInput.trim()}
+                    className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white text-xs font-semibold transition cursor-pointer shrink-0 flex items-center gap-1"
                   >
-                    Да, удалить
-                  </button>
-                  <button
-                    onClick={() => setShowCloseConfirm(false)}
-                    className="px-3 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs transition cursor-pointer"
-                  >
-                    Отмена
+                    {nickSaved ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Ок</span>
+                      </>
+                    ) : (
+                      <span>Сохранить</span>
+                    )}
                   </button>
                 </div>
+              </form>
+
+              <div className="pt-2 border-t border-neutral-800 space-y-2">
+                {/* Leave Room (available for any user) */}
+                <button
+                  onClick={() => {
+                    setShowSettings(false);
+                    onLeaveRoom();
+                  }}
+                  className="w-full py-2 px-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white text-xs font-semibold transition cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <LogOut className="w-3.5 h-3.5 text-neutral-400" />
+                  <span>Выйти из комнаты</span>
+                </button>
+
+                {/* Host: Close Room & Purge */}
+                {isHost && (
+                  <>
+                    {!showCloseConfirm ? (
+                      <button
+                        onClick={() => setShowCloseConfirm(true)}
+                        className="w-full py-2 px-3 rounded-xl bg-rose-950/60 hover:bg-rose-900/80 border border-rose-800/50 text-rose-300 hover:text-white text-xs font-semibold transition cursor-pointer flex items-center justify-center gap-2"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Закрыть комнату и удалить файлы</span>
+                      </button>
+                    ) : (
+                      <div className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-600/40 space-y-2">
+                        <p className="text-[11px] text-rose-200 leading-snug">
+                          Отключить всех участников и безвозвратно удалить видео и медиа?
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={handleConfirmClose}
+                            className="flex-1 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold transition cursor-pointer"
+                          >
+                            Да, удалить
+                          </button>
+                          <button
+                            onClick={() => setShowCloseConfirm(false)}
+                            className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs transition cursor-pointer"
+                          >
+                            Отмена
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
-            )}
-          </div>
-        ) : (
-          <button
-            onClick={onLeaveRoom}
-            className="p-1.5 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-rose-400 transition cursor-pointer"
-            title="Покинуть комнату"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
-        )}
+            </div>
+          )}
+        </div>
       </div>
     </header>
   );

@@ -19,7 +19,7 @@ import type {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const STORAGE_BASE_DIR = path.join(process.cwd(), 'storage', 'rooms');
 
 // Ensure base storage directory exists
@@ -27,10 +27,23 @@ if (!fs.existsSync(STORAGE_BASE_DIR)) {
   fs.mkdirSync(STORAGE_BASE_DIR, { recursive: true });
 }
 
+interface ChatMediaEntry {
+  id: string;
+  filename: string;
+  filePath: string;
+  size: number;
+  createdAt: number;
+}
+
 interface ServerRoomState extends RoomState {
   hostToken: string;
   creatorIp?: string;
+  chatMediaFiles: ChatMediaEntry[];
+  chatMediaTotalBytes: number;
 }
+
+const MAX_CHAT_MEDIA_FILE_SIZE = 10 * 1024 * 1024; // 10 MB per file
+const MAX_CHAT_MEDIA_ROOM_TOTAL = 100 * 1024 * 1024; // 100 MB total per room
 
 // In-memory room store
 const rooms = new Map<string, ServerRoomState>();
@@ -38,6 +51,14 @@ const rooms = new Map<string, ServerRoomState>();
 // Helper to get or create room storage directory
 function getRoomStorageDir(roomId: string): string {
   const dir = path.join(STORAGE_BASE_DIR, roomId);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+function getRoomChatMediaDir(roomId: string): string {
+  const dir = path.join(getRoomStorageDir(roomId), 'chat_media');
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -65,6 +86,37 @@ const upload = multer({
   },
 });
 
+const chatMediaStorage = multer.diskStorage({
+  destination: (req, _file, cb) => {
+    const roomId = req.params.roomId;
+    const mediaDir = getRoomChatMediaDir(roomId);
+    cb(null, mediaDir);
+  },
+  filename: (_req, file, cb) => {
+    const mediaId = uuidv4();
+    const ext = path.extname(file.originalname).toLowerCase() || '';
+    cb(null, `${mediaId}${ext}`);
+  },
+});
+
+const chatMediaUpload = multer({
+  storage: chatMediaStorage,
+  limits: {
+    fileSize: MAX_CHAT_MEDIA_FILE_SIZE,
+  },
+  fileFilter: (_req, file, cb) => {
+    const isAllowed =
+      (file.mimetype.startsWith('image/') && file.mimetype !== 'image/svg+xml') ||
+      file.mimetype.startsWith('video/') ||
+      file.mimetype.startsWith('audio/');
+    if (!isAllowed) {
+      cb(new Error('Разрешены только изображения (PNG/JPG/GIF/WebP), видео и аудиофайлы'));
+      return;
+    }
+    cb(null, true);
+  },
+});
+
 const app = express();
 app.set('trust proxy', true);
 
@@ -76,6 +128,7 @@ const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents>(server
     methods: ['GET', 'POST'],
   },
   transports: ['websocket', 'polling'],
+  perMessageDeflate: false, // Save 0.1 vCPU from compressing small JSON sync packets
 });
 
 app.use(express.json());
@@ -152,11 +205,9 @@ setInterval(async () => {
 
       const roomDir = getRoomStorageDir(session.roomId);
       const partPath = path.join(roomDir, `${fileId}.part`);
-      const metaPath = path.join(roomDir, `${fileId}.info`);
 
       try {
         await fsPromises.unlink(partPath).catch(() => {});
-        await fsPromises.unlink(metaPath).catch(() => {});
       } catch (err) {
         console.error(`[Auto-Cleanup] Ошибка удаления файлов для ${fileId}:`, err);
       }
@@ -207,6 +258,8 @@ app.post('/api/rooms/create', (req, res) => {
       isSystemPausedForBuffering: false,
     },
     emptyTimeoutId: null,
+    chatMediaFiles: [],
+    chatMediaTotalBytes: 0,
   };
 
   rooms.set(roomId, newRoom);
@@ -322,7 +375,6 @@ app.get('/api/rooms/:roomId/upload/status/:fileId', async (req, res) => {
 
   const roomDir = getRoomStorageDir(roomId);
   const partPath = path.join(roomDir, `${fileId}.part`);
-  const metaPath = path.join(roomDir, `${fileId}.info`);
 
   // Check active in-memory session
   const session = uploadSessions.get(fileId);
@@ -339,28 +391,6 @@ app.get('/api/rooms/:roomId/upload/status/:fileId', async (req, res) => {
       return;
     } catch {}
   }
-
-  // Check if .part exists with persisted .info on disk
-  try {
-    await fsPromises.access(partPath);
-    let completedChunks: number[] = [];
-    let totalChunks = 0;
-    try {
-      const metaContent = await fsPromises.readFile(metaPath, 'utf-8');
-      const meta = JSON.parse(metaContent);
-      if (Array.isArray(meta.completedChunks)) {
-        completedChunks = meta.completedChunks;
-      }
-      totalChunks = meta.totalChunks || 0;
-    } catch {}
-    res.json({
-      exists: true,
-      completed: false,
-      completedChunks,
-      totalChunks,
-    });
-    return;
-  } catch {}
 
   // Check if already completed and in playlist
   const existingItem = room.playlist.find((item) => item.id === fileId);
@@ -434,7 +464,6 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
 
   const roomDir = getRoomStorageDir(roomId);
   const partPath = path.join(roomDir, `${fileId}.part`);
-  const metaPath = path.join(roomDir, `${fileId}.info`);
 
   // Ensure file exists on disk asynchronously so concurrent chunk writes can open with 'r+' safely
   try {
@@ -446,7 +475,7 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
     } catch {}
   }
 
-  // Get or initialize active session
+  // Get or initialize active session in memory (zero per-chunk .info disk writes for higher I/O speed)
   let session = uploadSessions.get(fileId);
   if (!session) {
     session = {
@@ -459,13 +488,6 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
       lastActivity: Date.now(),
       isFinalizing: false,
     };
-    try {
-      const savedMetaStr = await fsPromises.readFile(metaPath, 'utf-8');
-      const savedMeta = JSON.parse(savedMetaStr);
-      if (Array.isArray(savedMeta.completedChunks)) {
-        savedMeta.completedChunks.forEach((c: number) => session!.completedChunks.add(c));
-      }
-    } catch {}
     uploadSessions.set(fileId, session);
   }
 
@@ -478,10 +500,11 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
     return;
   }
 
-  // Open writeStream directly at chunk offset with zero Node.js userland buffering
+  // Open writeStream directly at chunk offset with 512 KB buffer to drastically reduce syscalls on 0.1 vCPU
   const writeStream = fs.createWriteStream(partPath, {
     flags: 'r+',
     start: chunkOffset,
+    highWaterMark: 512 * 1024,
   });
 
   req.pipe(writeStream);
@@ -507,27 +530,15 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
       session.completedChunks.add(chunkIndex);
       session.lastActivity = Date.now();
 
-      // Persist completed chunks list asynchronously for resume/inspection support
-      fsPromises
-        .writeFile(
-          metaPath,
-          JSON.stringify({
-            fileId,
-            fileName,
-            totalSize,
-            totalChunks,
-            completedChunks: Array.from(session.completedChunks),
-            updatedAt: Date.now(),
-          })
-        )
-        .catch(() => {});
-
       // Finalize ONLY when every single chunk has completed, strictly guarded against race conditions
       const isAllCompleted = session.completedChunks.size === totalChunks;
 
       if (isAllCompleted) {
         // Race condition guard: execute finalization strictly once across concurrent chunks
         if (session.isFinalizing) {
+          if (!res.headersSent) {
+            res.json({ success: true, completed: true, alreadyFinalized: true, chunkIndex });
+          }
           return;
         }
         session.isFinalizing = true;
@@ -543,7 +554,6 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
         // Fully async atomic rename .part -> permanent file
         await fsPromises.rename(partPath, finalPath);
 
-        await fsPromises.unlink(metaPath).catch(() => {});
         uploadSessions.delete(fileId);
 
         const finalStat = await fsPromises.stat(finalPath);
@@ -631,11 +641,9 @@ app.post('/api/rooms/:roomId/upload/cancel/:fileId', async (req, res) => {
 
   const roomDir = getRoomStorageDir(roomId);
   const partPath = path.join(roomDir, `${fileId}.part`);
-  const metaPath = path.join(roomDir, `${fileId}.info`);
 
   try {
     await fsPromises.unlink(partPath).catch(() => {});
-    await fsPromises.unlink(metaPath).catch(() => {});
   } catch (err) {
     console.error('Error removing .part on cancel:', err);
   }
@@ -643,80 +651,215 @@ app.post('/api/rooms/:roomId/upload/cancel/:fileId', async (req, res) => {
   res.json({ success: true, cancelled: true });
 });
 
-// Seed or add public sample video for instant testing
-app.post('/api/rooms/:roomId/add-sample', (req, res) => {
+// Upload chat media (10 MB per file limit, 100 MB FIFO room quota)
+app.post('/api/rooms/:roomId/chat/upload', (req, res) => {
   const { roomId } = req.params;
   const room = rooms.get(roomId);
-
   if (!room) {
     res.status(404).json({ error: 'Комната не найдена' });
     return;
   }
 
-  const token = req.headers['x-host-token'] || req.query.token;
-  const socketId = req.headers['x-socket-id'] || req.query.socketId;
-  const isAuthorized =
-    (token && token === room.hostToken) ||
-    (socketId && socketId === room.hostId) ||
-    Object.keys(room.users).length === 0;
-
-  if (!isAuthorized) {
-    res.status(403).json({ error: 'Только хост может добавлять образцы' });
+  const socketId = (req.headers['x-socket-id'] as string) || '';
+  const user = room.users[socketId];
+  if (!user) {
+    res.status(403).json({ error: 'Только участники комнаты могут отправлять медиа в чат' });
     return;
   }
 
-  const sampleName = req.body.sampleName || 'Big Buck Bunny (Тестовое видео)';
-  const sampleUrl = req.body.sampleUrl || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-
-  const item: PlaylistItem = {
-    id: uuidv4(),
-    originalName: sampleName,
-    filename: 'sample.mp4',
-    size: 158008374,
-    mimeType: 'video/mp4',
-    url: sampleUrl,
-  };
-
-  room.playlist.push(item);
-
-  io.to(roomId).emit('playlist:updated', {
-    playlist: room.playlist,
-    currentTrackIndex: room.currentTrackIndex,
-  });
-
-  io.to(roomId).emit('chat:message', {
-    id: uuidv4(),
-    userId: 'system',
-    nickname: 'Система',
-    text: `Добавлено демо-видео: "${sampleName}"`,
-    timestamp: Date.now(),
-    type: 'system',
-  });
-
-  res.json({ success: true, item, playlist: room.playlist });
-});
-
-// Stream video via HTTP 206 Partial Content
-app.get('/api/rooms/:roomId/stream/:fileId', (req, res) => {
-  const { roomId, fileId } = req.params;
-  const roomDir = path.join(STORAGE_BASE_DIR, roomId);
-
-  let filePath = path.join(roomDir, fileId);
-
-  // If file doesn't exist with exact name, check if fileId is base name without extension
-  if (!fs.existsSync(filePath)) {
-    const matched = fs.existsSync(roomDir)
-      ? fs.readdirSync(roomDir).find((f) => f.startsWith(fileId))
-      : null;
-    if (matched) {
-      filePath = path.join(roomDir, matched);
-    } else {
-      res.status(404).send('Видео файл не найден');
+  chatMediaUpload.single('media')(req, res, async (err) => {
+    if (err) {
+      if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+        res.status(413).json({ error: 'Файл превышает лимит 10 МБ' });
+        return;
+      }
+      res.status(400).json({ error: err.message || 'Ошибка загрузки медиафайла' });
       return;
     }
+
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ error: 'Файл не был передан' });
+      return;
+    }
+
+    if (file.size > MAX_CHAT_MEDIA_FILE_SIZE) {
+      await fsPromises.unlink(file.path).catch(() => {});
+      res.status(413).json({ error: 'Файл превышает лимит 10 МБ' });
+      return;
+    }
+
+    // FIFO cleanup if total chat media in room exceeds 100 MB
+    const deletedMediaIds: string[] = [];
+    while (
+      room.chatMediaTotalBytes + file.size > MAX_CHAT_MEDIA_ROOM_TOTAL &&
+      room.chatMediaFiles.length > 0
+    ) {
+      const oldest = room.chatMediaFiles.shift();
+      if (oldest) {
+        room.chatMediaTotalBytes = Math.max(0, room.chatMediaTotalBytes - oldest.size);
+        deletedMediaIds.push(oldest.id);
+        await fsPromises.unlink(oldest.filePath).catch(() => {});
+      }
+    }
+
+    const mediaId = path.basename(file.filename, path.extname(file.filename));
+    room.chatMediaFiles.push({
+      id: mediaId,
+      filename: file.filename,
+      filePath: file.path,
+      size: file.size,
+      createdAt: Date.now(),
+    });
+    room.chatMediaTotalBytes += file.size;
+
+    if (deletedMediaIds.length > 0) {
+      io.to(roomId).emit('chat:media_pruned', { deletedMediaIds });
+    }
+
+    let mediaKind: 'image' | 'video' | 'audio' = 'image';
+    if (file.mimetype.startsWith('video/')) mediaKind = 'video';
+    else if (file.mimetype.startsWith('audio/')) mediaKind = 'audio';
+
+    const captionText = typeof req.body?.text === 'string' ? req.body.text.trim().slice(0, 500) : '';
+
+    const message: ChatMessage = {
+      id: uuidv4(),
+      userId: socketId,
+      nickname: user.nickname,
+      text: captionText,
+      timestamp: Date.now(),
+      type: 'message',
+      media: {
+        id: mediaId,
+        url: `/api/rooms/${roomId}/chat/media/${file.filename}`,
+        filename: file.filename,
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        mediaKind,
+      },
+    };
+
+    io.to(roomId).emit('chat:message', message);
+
+    res.json({
+      success: true,
+      message,
+      roomMediaUsageBytes: room.chatMediaTotalBytes,
+    });
+  });
+});
+
+// Serve chat media with HTTP 206 support
+app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
+  const { roomId, filename } = req.params;
+  const safeFilename = path.basename(filename);
+  const mediaDir = path.resolve(STORAGE_BASE_DIR, path.basename(roomId), 'chat_media');
+  const filePath = path.resolve(mediaDir, safeFilename);
+
+  if (!filePath.startsWith(mediaDir + path.sep)) {
+    res.status(403).send('Forbidden');
+    return;
   }
 
-  const stat = fs.statSync(filePath);
+  let stat: fs.Stats;
+  try {
+    stat = await fsPromises.stat(filePath);
+  } catch {
+    res.status(404).send('Медиафайл удалён или не найден');
+    return;
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeMap: Record<string, string> = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.ogg': 'audio/ogg',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4',
+  };
+  const mimeType = mimeMap[ext] || 'application/octet-stream';
+  const fileSize = stat.size;
+  const range = req.headers.range;
+
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+    if (isNaN(start) || start >= fileSize) {
+      res.status(416).set('Content-Range', `bytes */${fileSize}`).send('Requested range not satisfiable');
+      return;
+    }
+
+    const chunksize = end - start + 1;
+    const fileStream = fs.createReadStream(filePath, {
+      start,
+      end,
+      highWaterMark: 256 * 1024,
+    });
+
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': chunksize,
+      'Content-Type': mimeType,
+      'Cache-Control': 'public, max-age=86400, no-transform',
+    });
+
+    req.on('close', () => fileStream.destroy());
+    fileStream.pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': fileSize,
+      'Content-Type': mimeType,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'public, max-age=86400, no-transform',
+    });
+    const fileStream = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
+    req.on('close', () => fileStream.destroy());
+    fileStream.pipe(res);
+  }
+});
+
+// Stream video via HTTP 206 Partial Content (async non-blocking stat + 256KB buffer)
+app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
+  const { roomId, fileId } = req.params;
+  const roomDir = path.resolve(STORAGE_BASE_DIR, path.basename(roomId));
+  let filePath = path.resolve(roomDir, path.basename(fileId));
+
+  if (!filePath.startsWith(roomDir + path.sep)) {
+    res.status(403).send('Forbidden');
+    return;
+  }
+
+  let stat: fs.Stats | null = null;
+  try {
+    stat = await fsPromises.stat(filePath);
+  } catch {
+    try {
+      const files = await fsPromises.readdir(roomDir);
+      const matched = files.find((f) => f.startsWith(path.basename(fileId)));
+      if (matched) {
+        filePath = path.resolve(roomDir, matched);
+        stat = await fsPromises.stat(filePath);
+      }
+    } catch {}
+  }
+
+  if (!stat) {
+    res.status(404).send('Видео файл не найден');
+    return;
+  }
+
   const fileSize = stat.size;
   const ext = path.extname(filePath).toLowerCase();
 
@@ -732,7 +875,7 @@ app.get('/api/rooms/:roomId/stream/:fileId', (req, res) => {
     const start = parseInt(parts[0], 10);
     const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 
-    if (start >= fileSize) {
+    if (isNaN(start) || start >= fileSize) {
       res.status(416).set('Content-Range', `bytes */${fileSize}`).send('Requested range not satisfiable');
       return;
     }
@@ -741,7 +884,7 @@ app.get('/api/rooms/:roomId/stream/:fileId', (req, res) => {
     const fileStream = fs.createReadStream(filePath, {
       start,
       end,
-      highWaterMark: 128 * 1024, // 128 KB buffer to prevent memory spikes
+      highWaterMark: 256 * 1024, // 256 KB buffer for faster streaming with low syscalls on 0.1 vCPU
     });
 
     res.writeHead(206, {
@@ -767,7 +910,7 @@ app.get('/api/rooms/:roomId/stream/:fileId', (req, res) => {
       'Cache-Control': 'public, max-age=86400, no-transform',
     });
 
-    const fileStream = fs.createReadStream(filePath, { highWaterMark: 128 * 1024 });
+    const fileStream = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
     req.on('close', () => {
       fileStream.destroy();
     });
@@ -804,6 +947,8 @@ io.on('connection', (socket) => {
           isSystemPausedForBuffering: false,
         },
         emptyTimeoutId: null,
+        chatMediaFiles: [],
+        chatMediaTotalBytes: 0,
       };
       rooms.set(roomId, room);
       getRoomStorageDir(roomId);
@@ -846,6 +991,36 @@ io.on('connection', (socket) => {
       userId: 'system',
       nickname: 'Система',
       text: `${cleanNick} присоединился к комнате`,
+      timestamp: Date.now(),
+      type: 'system',
+    });
+  });
+
+  // Change nickname directly in lobby without leaving room
+  socket.on('user:change_nickname', ({ nickname }) => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    const user = room.users[socket.id];
+    if (!user) return;
+
+    const newNick = (nickname || '').trim().slice(0, 24);
+    if (!newNick || newNick === user.nickname) return;
+
+    const oldNick = user.nickname;
+    user.nickname = newNick;
+
+    io.to(currentRoomId).emit('room:user_updated', {
+      userId: socket.id,
+      nickname: newNick,
+    });
+
+    io.to(currentRoomId).emit('chat:message', {
+      id: uuidv4(),
+      userId: 'system',
+      nickname: 'Система',
+      text: `${oldNick} сменил(а) ник на ${newNick}`,
       timestamp: Date.now(),
       type: 'system',
     });
@@ -1263,6 +1438,11 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(__dirname, 'dist');
+    if (!fs.existsSync(path.join(distPath, 'index.html'))) {
+      console.error(
+        `[WatchParty Server] ОШИБКА: Файл ${path.join(distPath, 'index.html')} не найден! Убедитесь, что в Build Command выполняется "npm run build".`
+      );
+    }
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

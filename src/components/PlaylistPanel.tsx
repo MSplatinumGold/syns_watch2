@@ -6,7 +6,6 @@ import {
   ChevronUp,
   ChevronDown,
   Film,
-  Sparkles,
   AlertTriangle,
   Loader2,
   CheckCircle2,
@@ -16,7 +15,7 @@ import {
 import type { PlaylistItem } from '../types/watchparty.ts';
 import { formatBytes } from '../utils/format.ts';
 
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB chunks
+const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB chunks for faster TCP ramp-up and fewer roundtrips
 
 function formatRemainingTime(seconds: number): string {
   if (seconds <= 0 || !isFinite(seconds)) return '< 1 сек';
@@ -71,7 +70,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
 
   const [upload, setUpload] = useState<ResumableUploadState | null>(null);
   const [codecWarning, setCodecWarning] = useState<string | null>(null);
-  const [isAddingSample, setIsAddingSample] = useState(false);
 
   const speedTrackerRef = useRef<{ lastTime: number; lastTotalBytes: number }>({
     lastTime: Date.now(),
@@ -204,7 +202,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     async (file: File, fileId: string, initialPendingChunks: number[]) => {
       const queue = [...initialPendingChunks];
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-      const CONCURRENCY = 3; // 3 concurrent chunks uploaded in parallel
+      const CONCURRENCY = 4; // 4 concurrent 10MB chunks uploaded in parallel
 
       const worker = async (): Promise<void> => {
         while (queue.length > 0) {
@@ -358,30 +356,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           },
         });
       } catch {}
-    }
-  };
-
-  // Add instant demo sample
-  const handleAddSample = async (sampleName: string, sampleUrl: string) => {
-    if (!isHost || isAddingSample) return;
-    setIsAddingSample(true);
-    try {
-      const res = await fetch(`/api/rooms/${roomId}/add-sample`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-host-token': hostToken,
-          'x-socket-id': socketId,
-        },
-        body: JSON.stringify({ sampleName, sampleUrl }),
-      });
-      if (!res.ok) {
-        throw new Error(await res.text());
-      }
-    } catch (err) {
-      console.error('Failed to add sample:', err);
-    } finally {
-      setIsAddingSample(false);
     }
   };
 
@@ -571,7 +545,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
             <p className="text-sm font-medium text-neutral-200">Файлов пока нет</p>
             <p className="text-xs text-neutral-500 mt-1 max-w-xs">
               {isHost
-                ? 'Загрузите собственное видео или добавьте демо-видео для быстрой проверки.'
+                ? 'Загрузите видеофайл с устройства, чтобы начать совместный просмотр.'
                 : 'Ожидайте, пока хост добавит видео в очередь.'}
             </p>
 
@@ -582,19 +556,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                   className="w-full py-2 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition shadow cursor-pointer"
                 >
                   <UploadCloud className="w-4 h-4" /> Выбрать локальный файл
-                </button>
-                <button
-                  onClick={() =>
-                    handleAddSample(
-                      'Big Buck Bunny (HD Demo)',
-                      'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
-                    )
-                  }
-                  disabled={isAddingSample}
-                  className="w-full py-2 px-3 bg-neutral-800 hover:bg-neutral-700 text-amber-300 border border-amber-500/30 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
-                >
-                  <Sparkles className="w-4 h-4 text-amber-400" />
-                  {isAddingSample ? 'Добавление...' : 'Добавить демо: Big Buck Bunny'}
                 </button>
               </div>
             )}
@@ -681,27 +642,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           })
         )}
       </div>
-
-      {/* Footer Add Sample Shortcut (Host only, when playlist already has items) */}
-      {isHost && playlist.length > 0 && (
-        <div className="p-2.5 bg-neutral-950/80 border-t border-neutral-800 flex items-center justify-between text-xs">
-          <span className="text-[11px] text-neutral-500">Добавить еще:</span>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() =>
-                handleAddSample(
-                  'Tears of Steel (Sci-Fi Demo)',
-                  'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4'
-                )
-              }
-              disabled={isAddingSample}
-              className="text-[11px] text-amber-400 hover:text-amber-300 font-medium transition cursor-pointer"
-            >
-              + Демо: Tears of Steel
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

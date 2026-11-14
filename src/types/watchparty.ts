@@ -34,6 +34,17 @@ export interface RoomState {
   emptyTimeoutId?: NodeJS.Timeout | null;
 }
 
+export interface ChatMediaAttachment {
+  id: string;
+  url: string;
+  filename: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  mediaKind: 'image' | 'video' | 'audio';
+  expired?: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   userId: string;
@@ -41,6 +52,7 @@ export interface ChatMessage {
   text: string;
   timestamp: number;
   type: 'message' | 'system';
+  media?: ChatMediaAttachment;
 }
 
 export interface DanmakuItem extends ChatMessage {
@@ -49,6 +61,7 @@ export interface DanmakuItem extends ChatMessage {
 
 export interface ClientToServerEvents {
   'room:join': (payload: { roomId: string; nickname: string; hostToken?: string }) => void;
+  'user:change_nickname': (payload: { nickname: string }) => void;
   'host:play': (payload: { currentTime: number }) => void;
   'host:pause': (payload: { currentTime: number }) => void;
   'host:seek': (payload: { targetTime: number }) => void;
@@ -68,6 +81,7 @@ export interface ServerToClientEvents {
   'room:init_state': (state: RoomState) => void;
   'room:user_joined': (user: User) => void;
   'room:user_left': (payload: { userId: string; newHostId?: string }) => void;
+  'room:user_updated': (payload: { userId: string; nickname: string }) => void;
   'room:host_changed': (payload: { hostId: string }) => void;
   'sync:play': (payload: { currentTime: number; serverTimestamp: number }) => void;
   'sync:pause': (payload: { currentTime: number }) => void;
@@ -77,6 +91,7 @@ export interface ServerToClientEvents {
   'playlist:updated': (payload: { playlist: PlaylistItem[]; currentTrackIndex: number }) => void;
   'users:progress': (payload: { userId: string; currentTime: number }) => void;
   'chat:message': (message: ChatMessage) => void;
+  'chat:media_pruned': (payload: { deletedMediaIds: string[] }) => void;
   'room:closed': (payload: { reason: string }) => void;
   'error:notification': (payload: { message: string }) => void;
 }
