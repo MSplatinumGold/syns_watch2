@@ -16,6 +16,7 @@ import type {
   ClientToServerEvents,
   ServerToClientEvents,
 } from './src/types/watchparty.ts';
+import { resolveStickerUrl } from './src/utils/stickers.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1553,8 +1554,9 @@ io.on('connection', (socket) => {
 
     const cleanReplyTo = sanitizeReplyTo(replyTo);
 
-    // Handle Telegram-style instant sticker message
-    if (typeof stickerId === 'string' && /^hamster_(0[1-9]|[1-3]\d|40)$/.test(stickerId)) {
+    // Handle Telegram-style instant sticker message (any valid sticker across all packs)
+    const stickerUrl = resolveStickerUrl(stickerId);
+    if (stickerUrl && typeof stickerId === 'string') {
       const messageId = uuidv4();
       const stickerMsg: ChatMessage = {
         id: messageId,
@@ -1565,7 +1567,7 @@ io.on('connection', (socket) => {
         timestamp: Date.now(),
         type: 'message',
         stickerId,
-        stickerUrl: `/stickers/${stickerId}.webp`,
+        stickerUrl,
         replyTo: cleanReplyTo,
       };
       registerChatMessage(currentRoomId, messageId, socket.id);

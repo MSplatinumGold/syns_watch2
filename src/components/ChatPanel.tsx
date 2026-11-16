@@ -21,16 +21,10 @@ import {
 } from 'lucide-react';
 import type { ChatMessage, ChatReplyRef, RoomUploadProgress, User } from '../types/watchparty.ts';
 import { formatBytes, parseTime } from '../utils/format.ts';
+import { STICKER_PACKS } from '../utils/stickers.ts';
+import { StickerAsset } from './StickerAsset.tsx';
 
 const MAX_CHAT_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB limit per file
-
-const HAMSTER_STICKERS = Array.from({ length: 40 }, (_, i) => {
-  const id = `hamster_${String(i + 1).padStart(2, '0')}`;
-  return {
-    id,
-    url: `/stickers/${id}.webp`,
-  };
-});
 
 const CUTE_QUICK_ACTIONS = [
   { label: '💋 Поцеловать', word: 'поцеловать' },
@@ -78,6 +72,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 }) => {
   const [text, setText] = useState('');
   const [showStickerPicker, setShowStickerPicker] = useState(false);
+  const [activeStickerPackId, setActiveStickerPackId] = useState<string>(STICKER_PACKS[0].id);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [pendingPreviewUrl, setPendingPreviewUrl] = useState<string | null>(null);
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
@@ -583,11 +578,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                         </div>
                       </div>
                     )}
-                    <img
+                    <StickerAsset
                       src={msg.stickerUrl}
                       alt="Стикер"
-                      loading="lazy"
-                      className="w-28 h-28 sm:w-32 sm:h-32 object-contain drop-shadow-lg select-none"
+                      className="w-20 h-20 sm:w-24 sm:h-24 object-contain drop-shadow-lg select-none"
                     />
                   </div>
                 ) : (
@@ -910,49 +904,89 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           </div>
         )}
 
-        {/* Telegram-style Sticker Picker Popup */}
-        {showStickerPicker && (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-full mb-2 left-2 right-2 sm:left-2 sm:right-auto sm:w-80 bg-neutral-900/95 backdrop-blur-md border border-neutral-700/80 rounded-2xl shadow-2xl z-30 overflow-hidden"
-          >
-            <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
-                <Sticker className="w-3.5 h-3.5 text-amber-400" />
-                <span className="text-xs font-semibold text-neutral-200">Хомяк</span>
-                <span className="text-[10px] text-neutral-500 font-mono">
-                  {HAMSTER_STICKERS.length}
-                </span>
+        {/* Telegram-style Multi-Pack Sticker Picker Popup */}
+        {showStickerPicker && (() => {
+          const activePack =
+            STICKER_PACKS.find((p) => p.id === activeStickerPackId) || STICKER_PACKS[0];
+          return (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="absolute bottom-full mb-2 left-2 right-2 sm:left-2 sm:right-auto sm:w-84 bg-neutral-900/95 backdrop-blur-md border border-neutral-700/80 rounded-2xl shadow-2xl z-30 overflow-hidden"
+            >
+              {/* Pack Thumbnail Strip (like Telegram) */}
+              <div className="px-2 pt-2 pb-1.5 border-b border-neutral-800/90 flex items-center gap-1 overflow-x-auto bg-neutral-950/60">
+                {STICKER_PACKS.map((pack) => {
+                  const isActive = pack.id === activePack.id;
+                  return (
+                    <button
+                      key={pack.id}
+                      type="button"
+                      onClick={() => setActiveStickerPackId(pack.id)}
+                      title={pack.name}
+                      className={`w-9 h-9 p-1 rounded-xl border shrink-0 transition flex items-center justify-center cursor-pointer ${
+                        isActive
+                          ? 'bg-amber-500/20 border-amber-500/60 shadow-sm'
+                          : 'bg-neutral-900/80 border-transparent hover:bg-neutral-800'
+                      }`}
+                    >
+                      <StickerAsset
+                        src={pack.stickers[0].url}
+                        alt={pack.name}
+                        className="w-full h-full object-contain"
+                      />
+                    </button>
+                  );
+                })}
               </div>
-              <button
-                type="button"
-                onClick={() => setShowStickerPicker(false)}
-                className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer"
-                title="Закрыть"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-            <div className="p-2 max-h-60 overflow-y-auto grid grid-cols-5 gap-1.5 overscroll-contain">
-              {HAMSTER_STICKERS.map((st) => (
+
+              {/* Active Pack Header */}
+              <div className="px-3 py-1.5 border-b border-neutral-800/70 flex items-center justify-between">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <Sticker className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="text-xs font-semibold text-neutral-200 truncate">
+                    {activePack.name}
+                  </span>
+                  <span className="text-[10px] text-neutral-500 font-mono shrink-0">
+                    {activePack.stickers.length}
+                  </span>
+                </div>
                 <button
-                  key={st.id}
                   type="button"
-                  onClick={() => handleSendSticker(st.id)}
-                  className="aspect-square p-1 rounded-xl hover:bg-neutral-800 active:scale-90 transition flex items-center justify-center cursor-pointer select-none"
-                  title="Отправить стикер"
+                  onClick={() => setShowStickerPicker(false)}
+                  className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer shrink-0"
+                  title="Закрыть"
                 >
-                  <img
-                    src={st.url}
-                    alt={st.id}
-                    loading="lazy"
-                    className="w-full h-full object-contain"
-                  />
+                  <X className="w-3.5 h-3.5" />
                 </button>
-              ))}
+              </div>
+
+              {/* Stickers Grid */}
+              <div className="p-2 max-h-60 overflow-y-auto grid grid-cols-5 gap-1.5 overscroll-contain">
+                {activePack.stickers.map((st) => (
+                  <button
+                    key={st.id}
+                    type="button"
+                    onClick={() => handleSendSticker(st.id)}
+                    className="relative aspect-square p-1 rounded-xl hover:bg-neutral-800 active:scale-90 transition flex items-center justify-center cursor-pointer select-none"
+                    title={st.animated ? 'Отправить анимированный стикер' : 'Отправить стикер'}
+                  >
+                    <StickerAsset
+                      src={st.url}
+                      alt={st.id}
+                      className="w-full h-full object-contain"
+                    />
+                    {st.animated && (
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute bottom-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-400 shadow-sm"
+                      />
+                    )}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         <input
           ref={mediaInputRef}
