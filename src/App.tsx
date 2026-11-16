@@ -714,9 +714,12 @@ export default function App() {
     socketRef.current?.emit('host:transfer_host', { newHostUserId });
   }, []);
 
-  const handleSendMessage = useCallback((text: string, replyTo?: ChatReplyRef) => {
-    socketRef.current?.emit('chat:send', { text, replyTo });
-  }, []);
+  const handleSendMessage = useCallback(
+    (text: string, replyTo?: ChatReplyRef, stickerId?: string) => {
+      socketRef.current?.emit('chat:send', { text, replyTo, stickerId });
+    },
+    []
+  );
 
   const handleEditMessage = useCallback((messageId: string, text: string) => {
     socketRef.current?.emit('chat:edit', { messageId, text });

@@ -62,6 +62,7 @@ export interface ChatReplyRef {
   text: string;
   hasMedia?: boolean;
   mediaKind?: 'image' | 'video' | 'audio';
+  isSticker?: boolean;
 }
 
 export interface ChatMessage {
@@ -74,6 +75,8 @@ export interface ChatMessage {
   editedAt?: number;
   type: 'message' | 'system' | 'action';
   media?: ChatMediaAttachment;
+  stickerId?: string;
+  stickerUrl?: string;
   replyTo?: ChatReplyRef;
 }
 
@@ -105,7 +108,7 @@ export interface ClientToServerEvents {
   'client:buffering_end': () => void;
   'client:progress': (payload: { currentTime: number }) => void;
   'host:close_room': () => void;
-  'chat:send': (payload: { text: string; replyTo?: ChatReplyRef }) => void;
+  'chat:send': (payload: { text: string; replyTo?: ChatReplyRef; stickerId?: string }) => void;
   'chat:edit': (payload: { messageId: string; text: string }) => void;
   'chat:delete': (payload: { messageId: string }) => void;
   'chat:typing': (payload: { isTyping: boolean }) => void;

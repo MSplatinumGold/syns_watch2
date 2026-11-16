@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Send,
-  Smile,
+  Sticker,
   Sparkles,
   Crown,
   Paperclip,
@@ -24,6 +24,14 @@ import { formatBytes, parseTime } from '../utils/format.ts';
 
 const MAX_CHAT_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB limit per file
 
+const HAMSTER_STICKERS = Array.from({ length: 40 }, (_, i) => {
+  const id = `hamster_${String(i + 1).padStart(2, '0')}`;
+  return {
+    id,
+    url: `/stickers/${id}.webp`,
+  };
+});
+
 const CUTE_QUICK_ACTIONS = [
   { label: '💋 Поцеловать', word: 'поцеловать' },
   { label: '🫂 Обнять', word: 'обнять' },
@@ -41,7 +49,7 @@ interface ChatPanelProps {
   isKeyboardOpen?: boolean;
   typingNicknames?: string[];
   roomUploadProgress?: RoomUploadProgress | null;
-  onSendMessage: (text: string, replyTo?: ChatReplyRef) => void;
+  onSendMessage: (text: string, replyTo?: ChatReplyRef, stickerId?: string) => void;
   onEditMessage: (messageId: string, text: string) => void;
   onDeleteMessage: (messageId: string) => void;
   onTypingChange?: (isTyping: boolean) => void;
@@ -50,12 +58,6 @@ interface ChatPanelProps {
 }
 
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
-
-const EXTENDED_EMOJIS = [
-  '🍿', '🎬', '🎉', '🚀', '👏', '🥳',
-  '🤔', '😴', '👀', '💀', '💯', '🤝',
-  '😎', '🙌', '✨', '⚡', '🤩', '😱',
-];
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
   messages,
@@ -75,7 +77,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onSeekToTimecode,
 }) => {
   const [text, setText] = useState('');
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [pendingPreviewUrl, setPendingPreviewUrl] = useState<string | null>(null);
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
@@ -93,10 +95,16 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const lastTypingEmitAtRef = useRef<number>(0);
 
   useEffect(() => {
-    if (!activeMenuMessageId) return;
-    const handleClose = () => setActiveMenuMessageId(null);
+    if (!activeMenuMessageId && !showStickerPicker) return;
+    const handleClose = () => {
+      setActiveMenuMessageId(null);
+      setShowStickerPicker(false);
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setActiveMenuMessageId(null);
+      if (e.key === 'Escape') {
+        setActiveMenuMessageId(null);
+        setShowStickerPicker(false);
+      }
     };
     document.addEventListener('click', handleClose);
     document.addEventListener('keydown', handleKeyDown);
@@ -104,7 +112,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       document.removeEventListener('click', handleClose);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [activeMenuMessageId]);
+  }, [activeMenuMessageId, showStickerPicker]);
 
   useEffect(() => {
     if (!pendingFile) {
@@ -198,6 +206,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     text: msg.text.slice(0, 120),
     hasMedia: Boolean(msg.media && !msg.media.expired),
     mediaKind: msg.media?.mediaKind,
+    isSticker: Boolean(msg.stickerId),
   });
 
   const startReply = (msg: ChatMessage) => {
@@ -257,7 +266,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       setEditingMessage(null);
       setText('');
       resetTextareaHeight();
-      setShowEmojiPicker(false);
+      setShowStickerPicker(false);
       lastTypingEmitAtRef.current = 0;
       onTypingChange?.(false);
       return;
@@ -295,7 +304,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         setText('');
         setReplyingTo(null);
         resetTextareaHeight();
-        setShowEmojiPicker(false);
+        setShowStickerPicker(false);
         lastTypingEmitAtRef.current = 0;
         onTypingChange?.(false);
         if (mediaInputRef.current) mediaInputRef.current.value = '';
@@ -312,9 +321,17 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setText('');
     setReplyingTo(null);
     resetTextareaHeight();
-    setShowEmojiPicker(false);
+    setShowStickerPicker(false);
     lastTypingEmitAtRef.current = 0;
     onTypingChange?.(false);
+  };
+
+  const handleSendSticker = (stickerId: string) => {
+    if (editingMessage) return;
+    const replyRef = replyingTo ? toReplyRef(replyingTo) : undefined;
+    onSendMessage('', replyRef, stickerId);
+    setReplyingTo(null);
+    setShowStickerPicker(false);
   };
 
   const handleQuickAction = (word: string) => {
@@ -368,10 +385,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       }
       return <React.Fragment key={idx}>{part}</React.Fragment>;
     });
-  };
-
-  const handleInsertEmoji = (emoji: string) => {
-    setText((prev) => prev + emoji);
   };
 
   const formatMessageTime = (ts: number) => {
@@ -536,91 +549,136 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   )}
                 </div>
 
-                <div
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (isMe) {
-                      setActiveMenuMessageId((prev) => (prev === msg.id ? null : msg.id));
-                    } else {
-                      startReply(msg);
-                    }
-                  }}
-                  title={isMe ? 'Нажмите для действий с сообщением' : 'Нажмите, чтобы ответить'}
-                  className={`px-3 py-2 rounded-2xl text-xs md:text-sm max-w-[85%] break-words shadow-sm space-y-1.5 cursor-pointer active:scale-[0.99] transition select-text ${
-                    isMe
-                      ? 'bg-rose-600 hover:bg-rose-500/95 text-white rounded-tr-xs'
-                      : 'bg-neutral-800 hover:bg-neutral-700/80 text-neutral-200 border border-neutral-700/60 rounded-tl-xs'
-                  }`}
-                >
-                  {msg.replyTo && (
-                    <div
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        scrollToMessage(msg.replyTo!.id);
-                      }}
-                      className={`px-2 py-1 rounded-lg border-l-2 text-[11px] cursor-pointer transition ${
-                        isMe
-                          ? 'bg-black/20 border-white/75 hover:bg-black/30 text-white/95'
-                          : 'bg-neutral-900/80 border-rose-500 hover:bg-neutral-900 text-neutral-300'
-                      }`}
-                    >
-                      <div className="font-semibold truncate">{msg.replyTo.nickname}</div>
-                      <div className="truncate opacity-80">
-                        {msg.replyTo.text ||
-                          (msg.replyTo.hasMedia
-                            ? `[${formatMediaLabel(msg.replyTo.mediaKind)}]`
-                            : 'Сообщение')}
+                {msg.stickerUrl ? (
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (isMe) {
+                        setActiveMenuMessageId((prev) => (prev === msg.id ? null : msg.id));
+                      } else {
+                        startReply(msg);
+                      }
+                    }}
+                    title={isMe ? 'Нажмите для действий со стикером' : 'Нажмите, чтобы ответить'}
+                    className={`flex flex-col ${
+                      isMe ? 'items-end' : 'items-start'
+                    } cursor-pointer active:scale-[0.97] transition`}
+                  >
+                    {msg.replyTo && (
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          scrollToMessage(msg.replyTo!.id);
+                        }}
+                        className="mb-1 px-2.5 py-1 rounded-xl bg-neutral-800/90 border border-neutral-700/70 border-l-2 border-l-rose-500 text-[11px] text-neutral-300 max-w-[200px] cursor-pointer hover:bg-neutral-800 transition"
+                      >
+                        <div className="font-semibold truncate">{msg.replyTo.nickname}</div>
+                        <div className="truncate opacity-80">
+                          {msg.replyTo.text ||
+                            (msg.replyTo.isSticker
+                              ? '[Стикер]'
+                              : msg.replyTo.hasMedia
+                              ? `[${formatMediaLabel(msg.replyTo.mediaKind)}]`
+                              : 'Сообщение')}
+                        </div>
                       </div>
-                    </div>
-                  )}
-
-                  {msg.media && (
-                    <div>
-                      {msg.media.expired ? (
-                        <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-black/25 text-[11px] text-neutral-300/80 italic">
-                          <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                          <span>Медиа удалено (превышен лимит 100 МБ комнаты)</span>
+                    )}
+                    <img
+                      src={msg.stickerUrl}
+                      alt="Стикер"
+                      loading="lazy"
+                      className="w-28 h-28 sm:w-32 sm:h-32 object-contain drop-shadow-lg select-none"
+                    />
+                  </div>
+                ) : (
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (isMe) {
+                        setActiveMenuMessageId((prev) => (prev === msg.id ? null : msg.id));
+                      } else {
+                        startReply(msg);
+                      }
+                    }}
+                    title={isMe ? 'Нажмите для действий с сообщением' : 'Нажмите, чтобы ответить'}
+                    className={`px-3 py-2 rounded-2xl text-xs md:text-sm max-w-[85%] break-words shadow-sm space-y-1.5 cursor-pointer active:scale-[0.99] transition select-text ${
+                      isMe
+                        ? 'bg-rose-600 hover:bg-rose-500/95 text-white rounded-tr-xs'
+                        : 'bg-neutral-800 hover:bg-neutral-700/80 text-neutral-200 border border-neutral-700/60 rounded-tl-xs'
+                    }`}
+                  >
+                    {msg.replyTo && (
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          scrollToMessage(msg.replyTo!.id);
+                        }}
+                        className={`px-2 py-1 rounded-lg border-l-2 text-[11px] cursor-pointer transition ${
+                          isMe
+                            ? 'bg-black/20 border-white/75 hover:bg-black/30 text-white/95'
+                            : 'bg-neutral-900/80 border-rose-500 hover:bg-neutral-900 text-neutral-300'
+                        }`}
+                      >
+                        <div className="font-semibold truncate">{msg.replyTo.nickname}</div>
+                        <div className="truncate opacity-80">
+                          {msg.replyTo.text ||
+                            (msg.replyTo.isSticker
+                              ? '[Стикер]'
+                              : msg.replyTo.hasMedia
+                              ? `[${formatMediaLabel(msg.replyTo.mediaKind)}]`
+                              : 'Сообщение')}
                         </div>
-                      ) : msg.media.mediaKind === 'image' ? (
-                        <img
-                          src={msg.media.url}
-                          alt={msg.media.originalName}
-                          loading="lazy"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setLightboxImageUrl(msg.media!.url);
-                          }}
-                          className="max-h-60 w-auto max-w-full rounded-xl object-contain bg-black/30 cursor-pointer hover:opacity-95 transition"
-                        />
-                      ) : msg.media.mediaKind === 'video' ? (
-                        <video
-                          src={msg.media.url}
-                          controls
-                          playsInline
-                          preload="metadata"
-                          onClick={(e) => e.stopPropagation()}
-                          className="max-h-60 w-full rounded-xl bg-black"
-                        />
-                      ) : (
-                        <audio
-                          src={msg.media.url}
-                          controls
-                          preload="metadata"
-                          onClick={(e) => e.stopPropagation()}
-                          className="w-full max-w-[250px]"
-                        />
-                      )}
-                      {!msg.media.expired && (
-                        <div className="mt-1 flex items-center justify-between gap-2 text-[10px] opacity-75 font-mono">
-                          <span className="truncate">{msg.media.originalName}</span>
-                          <span className="shrink-0">{formatBytes(msg.media.size)}</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                      </div>
+                    )}
 
-                  {msg.text && <p>{renderMessageTextWithTimecodes(msg.text, isMe)}</p>}
-                </div>
+                    {msg.media && (
+                      <div>
+                        {msg.media.expired ? (
+                          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-black/25 text-[11px] text-neutral-300/80 italic">
+                            <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                            <span>Медиа удалено (превышен лимит 100 МБ комнаты)</span>
+                          </div>
+                        ) : msg.media.mediaKind === 'image' ? (
+                          <img
+                            src={msg.media.url}
+                            alt={msg.media.originalName}
+                            loading="lazy"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setLightboxImageUrl(msg.media!.url);
+                            }}
+                            className="max-h-60 w-auto max-w-full rounded-xl object-contain bg-black/30 cursor-pointer hover:opacity-95 transition"
+                          />
+                        ) : msg.media.mediaKind === 'video' ? (
+                          <video
+                            src={msg.media.url}
+                            controls
+                            playsInline
+                            preload="metadata"
+                            onClick={(e) => e.stopPropagation()}
+                            className="max-h-60 w-full rounded-xl bg-black"
+                          />
+                        ) : (
+                          <audio
+                            src={msg.media.url}
+                            controls
+                            preload="metadata"
+                            onClick={(e) => e.stopPropagation()}
+                            className="w-full max-w-[250px]"
+                          />
+                        )}
+                        {!msg.media.expired && (
+                          <div className="mt-1 flex items-center justify-between gap-2 text-[10px] opacity-75 font-mono">
+                            <span className="truncate">{msg.media.originalName}</span>
+                            <span className="shrink-0">{formatBytes(msg.media.size)}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {msg.text && <p>{renderMessageTextWithTimecodes(msg.text, isMe)}</p>}
+                  </div>
+                )}
 
                 {/* Own message click context menu (Reply + Edit + Delete) */}
                 {isMe && activeMenuMessageId === msg.id && (
@@ -636,15 +694,19 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                       <Reply className="w-3.5 h-3.5 text-sky-400" />
                       <span>Ответить</span>
                     </button>
-                    <div className="w-px h-4 bg-neutral-800" />
-                    <button
-                      type="button"
-                      onClick={() => startEdit(msg)}
-                      className="px-2.5 py-1 rounded-lg hover:bg-neutral-800 text-[11px] font-medium text-neutral-200 flex items-center gap-1.5 cursor-pointer transition"
-                    >
-                      <Pencil className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Изменить</span>
-                    </button>
+                    {!msg.stickerId && (
+                      <>
+                        <div className="w-px h-4 bg-neutral-800" />
+                        <button
+                          type="button"
+                          onClick={() => startEdit(msg)}
+                          className="px-2.5 py-1 rounded-lg hover:bg-neutral-800 text-[11px] font-medium text-neutral-200 flex items-center gap-1.5 cursor-pointer transition"
+                        >
+                          <Pencil className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Изменить</span>
+                        </button>
+                      </>
+                    )}
                     <div className="w-px h-4 bg-neutral-800" />
                     <button
                       type="button"
@@ -754,7 +816,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   </div>
                   <div className="text-[11px] text-neutral-400 truncate">
                     {replyingTo.text ||
-                      (replyingTo.media
+                      (replyingTo.stickerId
+                        ? '[Стикер]'
+                        : replyingTo.media
                         ? `[${formatMediaLabel(replyingTo.media.mediaKind)}]`
                         : 'Сообщение')}
                   </div>
@@ -846,19 +910,47 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           </div>
         )}
 
-        {/* Extended Emoji Picker Popup */}
-        {showEmojiPicker && (
-          <div className="absolute bottom-full mb-2 right-3 w-56 p-2 bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl grid grid-cols-6 gap-1 z-30">
-            {EXTENDED_EMOJIS.map((em) => (
+        {/* Telegram-style Sticker Picker Popup */}
+        {showStickerPicker && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="absolute bottom-full mb-2 left-2 right-2 sm:left-2 sm:right-auto sm:w-80 bg-neutral-900/95 backdrop-blur-md border border-neutral-700/80 rounded-2xl shadow-2xl z-30 overflow-hidden"
+          >
+            <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <Sticker className="w-3.5 h-3.5 text-amber-400" />
+                <span className="text-xs font-semibold text-neutral-200">Хомяк</span>
+                <span className="text-[10px] text-neutral-500 font-mono">
+                  {HAMSTER_STICKERS.length}
+                </span>
+              </div>
               <button
-                key={em}
                 type="button"
-                onClick={() => handleInsertEmoji(em)}
-                className="w-8 h-8 rounded hover:bg-neutral-800 flex items-center justify-center text-base cursor-pointer transition select-none"
+                onClick={() => setShowStickerPicker(false)}
+                className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer"
+                title="Закрыть"
               >
-                {em}
+                <X className="w-3.5 h-3.5" />
               </button>
-            ))}
+            </div>
+            <div className="p-2 max-h-60 overflow-y-auto grid grid-cols-5 gap-1.5 overscroll-contain">
+              {HAMSTER_STICKERS.map((st) => (
+                <button
+                  key={st.id}
+                  type="button"
+                  onClick={() => handleSendSticker(st.id)}
+                  className="aspect-square p-1 rounded-xl hover:bg-neutral-800 active:scale-90 transition flex items-center justify-center cursor-pointer select-none"
+                  title="Отправить стикер"
+                >
+                  <img
+                    src={st.url}
+                    alt={st.id}
+                    loading="lazy"
+                    className="w-full h-full object-contain"
+                  />
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
@@ -887,15 +979,19 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
           <button
             type="button"
-            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-            className={`p-2 rounded-xl border transition cursor-pointer shrink-0 ${
-              showEmojiPicker
+            disabled={Boolean(editingMessage)}
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowStickerPicker((prev) => !prev);
+            }}
+            className={`p-2 rounded-xl border transition cursor-pointer shrink-0 disabled:opacity-40 ${
+              showStickerPicker
                 ? 'bg-amber-500/20 border-amber-500/50 text-amber-400'
                 : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
             }`}
-            title="Эмодзи"
+            title="Стикеры"
           >
-            <Smile className="w-4 h-4" />
+            <Sticker className="w-4 h-4" />
           </button>
 
           {/* Using textarea instead of form+input prevents Chrome Android Password/Card/Address autofill bar */}

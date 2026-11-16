@@ -115,6 +115,7 @@ function sanitizeReplyTo(raw: unknown): ChatReplyRef | undefined {
     text: typeof r.text === 'string' ? r.text.slice(0, 120) : '',
     hasMedia: Boolean(r.hasMedia),
     mediaKind,
+    isSticker: Boolean(r.isSticker),
   };
 }
 
@@ -1542,14 +1543,38 @@ io.on('connection', (socket) => {
   });
 
   // Chat message
-  socket.on('chat:send', ({ text, replyTo }) => {
+  socket.on('chat:send', ({ text, replyTo, stickerId }) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
     const user = room.users[socket.id];
+    if (!user) return;
+
+    const cleanReplyTo = sanitizeReplyTo(replyTo);
+
+    // Handle Telegram-style instant sticker message
+    if (typeof stickerId === 'string' && /^hamster_(0[1-9]|[1-3]\d|40)$/.test(stickerId)) {
+      const messageId = uuidv4();
+      const stickerMsg: ChatMessage = {
+        id: messageId,
+        userId: socket.id,
+        nickname: user.nickname,
+        prefix: user.prefix,
+        text: '',
+        timestamp: Date.now(),
+        type: 'message',
+        stickerId,
+        stickerUrl: `/stickers/${stickerId}.webp`,
+        replyTo: cleanReplyTo,
+      };
+      registerChatMessage(currentRoomId, messageId, socket.id);
+      io.to(currentRoomId).emit('chat:message', stickerMsg);
+      return;
+    }
+
     const cleanText = (text || '').trim().slice(0, 500);
-    if (!cleanText || !user) return;
+    if (!cleanText) return;
 
     if (cleanText.toLowerCase() === '/help') {
       socket.emit('chat:message', {
@@ -1563,7 +1588,6 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const cleanReplyTo = sanitizeReplyTo(replyTo);
     const messageId = uuidv4();
     const message: ChatMessage = {
       id: messageId,
