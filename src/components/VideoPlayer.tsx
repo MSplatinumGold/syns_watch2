@@ -112,6 +112,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [bufferAheadSeconds, setBufferAheadSeconds] = useState(0);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const preloadControllerRef = useRef<AbortController | null>(null);
+  const preloadedBlobUrlRef = useRef<string | null>(null);
+  preloadedBlobUrlRef.current = preloadedBlobUrl;
+
+  const currentTimeRef = useRef(0);
+  currentTimeRef.current = currentTime;
+  const durationRef = useRef(0);
+  durationRef.current = duration;
+  const playbackRateRef = useRef(1.0);
+  playbackRateRef.current = playbackRate;
+  const isPlayingRef = useRef(playbackState.isPlaying);
+  isPlayingRef.current = playbackState.isPlaying;
+  const isMutedRef = useRef(isMuted);
+  isMutedRef.current = isMuted;
+  const volumeRef = useRef(volume);
+  volumeRef.current = volume;
+
   const clockOffsetRef = useRef(clockOffsetMs);
   clockOffsetRef.current = clockOffsetMs;
   const lastHardSeekAtRef = useRef(0);
@@ -177,6 +193,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Video source handling: prioritizes local preloaded blob if available, else network stream URL
   const videoSourceUrl = preloadedBlobUrl || currentTrack?.url;
 
+  // Cleanup preloaded blob, abort controller, and timers on unmount
+  useEffect(() => {
+    return () => {
+      if (preloadedBlobUrlRef.current) {
+        URL.revokeObjectURL(preloadedBlobUrlRef.current);
+        preloadedBlobUrlRef.current = null;
+      }
+      if (preloadControllerRef.current) {
+        preloadControllerRef.current.abort();
+        preloadControllerRef.current = null;
+      }
+      if (controlsTimeoutRef.current) {
+        clearTimeout(controlsTimeoutRef.current);
+        controlsTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   // Track changed -> Immediately reset timecode, buffer, and cached blob
   useEffect(() => {
     setCurrentTime(0);
@@ -185,8 +219,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setScrubbingTime(null);
     setIsFullyPreloaded(false);
     setPreloadProgress(null);
-    if (preloadedBlobUrl) {
-      URL.revokeObjectURL(preloadedBlobUrl);
+    if (preloadedBlobUrlRef.current) {
+      URL.revokeObjectURL(preloadedBlobUrlRef.current);
+      preloadedBlobUrlRef.current = null;
       setPreloadedBlobUrl(null);
     }
     if (preloadControllerRef.current) {
@@ -228,6 +263,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       const chunks: Uint8Array[] = [];
       let loaded = 0;
+      let lastProgressUpdate = 0;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -236,15 +272,25 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           chunks.push(value);
           loaded += value.length;
           if (total > 0) {
+            const now = Date.now();
             const pct = Math.min(100, Math.round((loaded / total) * 100));
-            setPreloadProgress(pct);
+            if (now - lastProgressUpdate >= 200 || pct === 100) {
+              lastProgressUpdate = now;
+              setPreloadProgress(pct);
+            }
           }
         }
       }
 
       const mime = currentTrack?.mimeType || 'video/mp4';
       const blob = new Blob(chunks as unknown as BlobPart[], { type: mime });
+      chunks.length = 0; // Release chunk array references promptly to reduce peak RAM
+
+      if (preloadedBlobUrlRef.current) {
+        URL.revokeObjectURL(preloadedBlobUrlRef.current);
+      }
       const blobUrl = URL.createObjectURL(blob);
+      preloadedBlobUrlRef.current = blobUrl;
 
       setPreloadedBlobUrl(blobUrl);
       setIsFullyPreloaded(true);
@@ -343,7 +389,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           video.pause();
         }
         setAutoplayBlocked(false);
-        if (playbackRate !== 1.0) setPlaybackRate(1.0);
+        if (playbackRateRef.current !== 1.0) {
+          playbackRateRef.current = 1.0;
+          setPlaybackRate(1.0);
+        }
         return;
       }
 
@@ -368,25 +417,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           video.currentTime = expectedTime;
         }
         video.playbackRate = 1.0;
-        setPlaybackRate(1.0);
+        if (playbackRateRef.current !== 1.0) {
+          playbackRateRef.current = 1.0;
+          setPlaybackRate(1.0);
+        }
       }
       // Smooth catch-up / slow-down if slightly drifted (0.15s - 1.5s)
       else if (delta > 0.15) {
         const rate = video.currentTime < expectedTime ? 1.05 : 0.95;
         video.playbackRate = rate;
-        setPlaybackRate(rate);
+        if (playbackRateRef.current !== rate) {
+          playbackRateRef.current = rate;
+          setPlaybackRate(rate);
+        }
       }
       // Perfectly in sync (<= 0.15s)
       else {
-        if (video.playbackRate !== 1.0) {
+        if (video.playbackRate !== 1.0 || playbackRateRef.current !== 1.0) {
           video.playbackRate = 1.0;
+          playbackRateRef.current = 1.0;
           setPlaybackRate(1.0);
         }
       }
     }, 350);
 
     return () => clearInterval(interval);
-  }, [playbackState, videoSourceUrl, playbackRate, autoplayBlocked, getServerNow, safePlay]);
+  }, [playbackState, videoSourceUrl, autoplayBlocked, getServerNow, safePlay]);
 
   // Direct sync action on playbackState change (immediate pause/play/seek)
   useEffect(() => {
@@ -562,28 +618,28 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   };
 
   // ---------------------------------------------------------------------------
-  // Smooth Scrubbing / Dragging on Seekbar (Item 5)
+  // Smooth Scrubbing / Dragging on Seekbar with Pointer Events (Mouse + Touch)
   // ---------------------------------------------------------------------------
-  const calculateTargetTimeFromEvent = (e: MouseEvent | React.MouseEvent) => {
-    if (!seekbarRef.current || !duration) return 0;
+  const calculateTargetTimeFromClientX = (clientX: number) => {
+    const dur = durationRef.current;
+    if (!seekbarRef.current || !dur) return { target: 0, x: 0 };
     const rect = seekbarRef.current.getBoundingClientRect();
-    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-    const percent = x / rect.width;
-    return percent * duration;
+    const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
+    const percent = rect.width > 0 ? x / rect.width : 0;
+    return { target: percent * dur, x };
   };
 
-  const handleSeekbarMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isHost || !duration) return;
+  const handleSeekbarPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isHost || !durationRef.current) return;
     isDraggingSeekRef.current = true;
-    const target = calculateTargetTimeFromEvent(e);
+    try {
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    } catch {}
+    const { target, x } = calculateTargetTimeFromClientX(e.clientX);
     setScrubbingTime(target);
     setCurrentTime(target);
     setHoverSeekTime(target);
-
-    const rect = seekbarRef.current?.getBoundingClientRect();
-    if (rect) {
-      setHoverSeekPos(Math.max(0, Math.min(e.clientX - rect.left, rect.width)));
-    }
+    setHoverSeekPos(x);
 
     if (videoRef.current) {
       videoRef.current.currentTime = target;
@@ -591,11 +647,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   };
 
   useEffect(() => {
-    const handleGlobalMouseMove = (e: MouseEvent) => {
-      if (!isDraggingSeekRef.current || !duration || !seekbarRef.current) return;
+    const handleGlobalPointerMove = (e: PointerEvent) => {
+      if (!isDraggingSeekRef.current || !durationRef.current || !seekbarRef.current) return;
       const rect = seekbarRef.current.getBoundingClientRect();
       const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-      const target = (x / rect.width) * duration;
+      const target = rect.width > 0 ? (x / rect.width) * durationRef.current : 0;
 
       setScrubbingTime(target);
       setCurrentTime(target);
@@ -607,13 +663,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       }
     };
 
-    const handleGlobalMouseUp = (e: MouseEvent) => {
+    const handleGlobalPointerUp = (e: PointerEvent) => {
       if (isDraggingSeekRef.current) {
         isDraggingSeekRef.current = false;
-        if (duration && seekbarRef.current) {
+        if (durationRef.current && seekbarRef.current) {
           const rect = seekbarRef.current.getBoundingClientRect();
           const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-          const finalTarget = (x / rect.width) * duration;
+          const finalTarget = rect.width > 0 ? (x / rect.width) * durationRef.current : 0;
 
           if (videoRef.current) {
             videoRef.current.currentTime = finalTarget;
@@ -626,21 +682,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       }
     };
 
-    window.addEventListener('mousemove', handleGlobalMouseMove);
-    window.addEventListener('mouseup', handleGlobalMouseUp);
+    window.addEventListener('pointermove', handleGlobalPointerMove);
+    window.addEventListener('pointerup', handleGlobalPointerUp);
+    window.addEventListener('pointercancel', handleGlobalPointerUp);
 
     return () => {
-      window.removeEventListener('mousemove', handleGlobalMouseMove);
-      window.removeEventListener('mouseup', handleGlobalMouseUp);
+      window.removeEventListener('pointermove', handleGlobalPointerMove);
+      window.removeEventListener('pointerup', handleGlobalPointerUp);
+      window.removeEventListener('pointercancel', handleGlobalPointerUp);
     };
-  }, [duration, onSeek]);
+  }, [onSeek]);
 
-  const handleSeekbarHover = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!duration || !seekbarRef.current) return;
+  const handleSeekbarHover = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!durationRef.current || !seekbarRef.current || isDraggingSeekRef.current) return;
+    if (e.pointerType === 'touch') return;
     const rect = seekbarRef.current.getBoundingClientRect();
     const hoverX = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-    const percent = hoverX / rect.width;
-    setHoverSeekTime(percent * duration);
+    const percent = rect.width > 0 ? hoverX / rect.width : 0;
+    setHoverSeekTime(percent * durationRef.current);
     setHoverSeekPos(hoverX);
   };
 
@@ -670,7 +729,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setExactTimeInput('');
   };
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts (reads live refs to avoid re-attaching listeners on every timeupdate)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const activeTag = (document.activeElement?.tagName || '').toLowerCase();
@@ -678,22 +737,49 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       if (e.code === 'Space') {
         e.preventDefault();
-        if (isHost) handleTogglePlay();
+        if (isHost) {
+          const video = videoRef.current;
+          const current = video ? video.currentTime : currentTimeRef.current;
+          if (isPlayingRef.current) {
+            onPause(current);
+          } else {
+            onPlay(current);
+          }
+        }
       } else if (e.code === 'KeyM') {
         e.preventDefault();
-        toggleMute();
+        const video = videoRef.current;
+        if (video) {
+          const nextMuted = !isMutedRef.current;
+          setIsMuted(nextMuted);
+          video.muted = nextMuted;
+          if (!nextMuted && volumeRef.current === 0) {
+            setVolume(0.5);
+            video.volume = 0.5;
+          }
+        }
       } else if (e.code === 'KeyF') {
         e.preventDefault();
-        toggleFullscreen();
+        if (containerRef.current) {
+          if (!document.fullscreenElement) {
+            containerRef.current.requestFullscreen().catch((err) => {
+              console.error('Fullscreen error:', err);
+            });
+            setIsFullscreen(true);
+          } else {
+            document.exitFullscreen();
+            setIsFullscreen(false);
+          }
+        }
       } else if (e.code === 'ArrowLeft' && isHost) {
         e.preventDefault();
-        const target = Math.max(0, currentTime - 5);
+        const target = Math.max(0, currentTimeRef.current - 5);
         if (videoRef.current) videoRef.current.currentTime = target;
         setCurrentTime(target);
         onSeek(target);
       } else if (e.code === 'ArrowRight' && isHost) {
         e.preventDefault();
-        const target = Math.min(duration, currentTime + 5);
+        const target = Math.min(durationRef.current, currentTimeRef.current + 5);
         if (videoRef.current) videoRef.current.currentTime = target;
         setCurrentTime(target);
         onSeek(target);
@@ -702,7 +788,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isHost, playbackState.isPlaying, currentTime, duration]);
+  }, [isHost, onPlay, onPause, onSeek]);
 
   const displayTime = scrubbingTime !== null ? scrubbingTime : currentTime;
   const progressPercent = duration > 0 ? (displayTime / duration) * 100 : 0;
@@ -914,15 +1000,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             : 'opacity-0 pointer-events-none'
         }`}
       >
-        {/* Smooth Seekbar Container with Drag Support (Item 5) */}
+        {/* Smooth Seekbar Container with Pointer Drag Support (Mouse & Touch) */}
         <div
           ref={seekbarRef}
-          onMouseDown={handleSeekbarMouseDown}
-          onMouseMove={handleSeekbarHover}
-          onMouseLeave={() => {
+          onPointerDown={handleSeekbarPointerDown}
+          onPointerMove={handleSeekbarHover}
+          onPointerLeave={() => {
             if (!isDraggingSeekRef.current) setHoverSeekTime(null);
           }}
-          className={`relative w-full h-3 group/seek flex items-center ${
+          className={`relative w-full h-3 group/seek flex items-center touch-none ${
             isHost ? 'cursor-pointer py-2' : 'cursor-default pointer-events-none'
           }`}
         >

@@ -28,9 +28,26 @@ const MAX_CHAT_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB limit per file
 
 const CUTE_QUICK_ACTIONS = [
   { label: '💋 Поцеловать', word: 'поцеловать' },
+  { label: '💋 В щёку', word: 'поцеловать в щеку' },
   { label: '🫂 Обнять', word: 'обнять' },
   { label: '🥹 Погладить', word: 'погладить' },
   { label: '❤️ Люблю', word: 'люблю' },
+];
+
+const RP_ACTIONS_GROUPS = [
+  { emoji: '💋', words: 'поцеловать, поцелуй, чмок, чмокнуть', example: 'поцеловать в щеку' },
+  { emoji: '🫂', words: 'обнять, обними, обнимаю, обнимашки' },
+  { emoji: '🥹', words: 'погладить, погладь, глажу' },
+  { emoji: '💥', words: 'ударить, стукнуть, треснуть, бонк' },
+  { emoji: '🦶', words: 'пнуть, пинок  •  👋 шлепнуть' },
+  { emoji: '🦷', words: 'укусить, кусь, куснуть  •  👅 лизнуть, лизь' },
+  { emoji: '🍿', words: 'покормить, покорми  •  💐 подарить цветы, цветы' },
+  { emoji: '🙌', words: 'дать пять, дай пять, пятюня' },
+  { emoji: '🤝', words: 'пожать руку, жму руку' },
+  { emoji: '😉', words: 'подмигнуть  •  😊 улыбнуться  •  👏 похлопать, аплодисменты' },
+  { emoji: '🌟', words: 'похвалить, молодец  •  ❤️‍🩹 утешить, пожалеть' },
+  { emoji: '🙏', words: 'поблагодарить, спасибо  •  🙇 извиниться, прости, извини' },
+  { emoji: '🥂', words: 'чокнуться, выпить  •  ⏰ разбудить, проснись  •  ❤️ люблю' },
 ];
 
 interface ChatPanelProps {
@@ -82,23 +99,36 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [activeMenuMessageId, setActiveMenuMessageId] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [showActionsHelp, setShowActionsHelp] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const mediaInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isNearBottomRef = useRef(true);
   const lastTypingEmitAtRef = useRef<number>(0);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (!activeMenuMessageId && !showStickerPicker) return;
+    return () => {
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+        highlightTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeMenuMessageId && !showStickerPicker && !showActionsHelp) return;
     const handleClose = () => {
       setActiveMenuMessageId(null);
       setShowStickerPicker(false);
+      setShowActionsHelp(false);
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setActiveMenuMessageId(null);
         setShowStickerPicker(false);
+        setShowActionsHelp(false);
       }
     };
     document.addEventListener('click', handleClose);
@@ -107,7 +137,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       document.removeEventListener('click', handleClose);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [activeMenuMessageId, showStickerPicker]);
+  }, [activeMenuMessageId, showStickerPicker, showActionsHelp]);
 
   useEffect(() => {
     if (!pendingFile) {
@@ -241,7 +271,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       setHighlightedMessageId(messageId);
-      setTimeout(() => {
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+      highlightTimerRef.current = setTimeout(() => {
+        highlightTimerRef.current = null;
         setHighlightedMessageId((curr) => (curr === messageId ? null : curr));
       }, 1400);
     }
@@ -412,6 +446,75 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             onClick={(e) => e.stopPropagation()}
             className="max-w-full max-h-[90vh] rounded-xl object-contain shadow-2xl"
           />
+        </div>
+      )}
+
+      {/* Slim Chat Top Bar with small RP Actions Icon (replaces /help) */}
+      {!isKeyboardOpen && (
+        <div className="px-3 py-1.5 bg-neutral-950/60 border-b border-neutral-800/80 flex items-center justify-between shrink-0 relative">
+          <span className="text-[11px] font-medium text-neutral-400 select-none">
+            Чат комнаты
+          </span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowActionsHelp((prev) => !prev);
+            }}
+            className={`w-6 h-6 rounded-lg border flex items-center justify-center transition cursor-pointer ${
+              showActionsHelp
+                ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                : 'bg-neutral-900 hover:bg-neutral-800 border-neutral-800 text-neutral-400 hover:text-amber-300'
+            }`}
+            title="Доступные действия в чате"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+          </button>
+
+          {showActionsHelp && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="absolute top-full mt-1.5 right-2 left-2 sm:left-auto sm:w-80 bg-neutral-900/95 backdrop-blur-md border border-neutral-700/80 rounded-2xl shadow-2xl z-30 overflow-hidden"
+            >
+              <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between bg-neutral-950/70">
+                <div className="flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="text-xs font-semibold text-white">Действия в ответе</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowActionsHelp(false)}
+                  className="p-0.5 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer"
+                  title="Закрыть"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="p-2.5 max-h-64 overflow-y-auto space-y-1.5 text-[11px]">
+                <p className="text-neutral-400 leading-snug pb-1 border-b border-neutral-800/80">
+                  Нажмите на сообщение участника и ответьте словом ниже. Можно добавить уточнение, например:{' '}
+                  <span className="text-amber-300 font-medium">поцеловать в щеку</span>.
+                </p>
+                {RP_ACTIONS_GROUPS.map((grp, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-start gap-2 px-2 py-1 rounded-lg bg-neutral-950/60 border border-neutral-800/60"
+                  >
+                    <span className="text-sm leading-none mt-0.5 shrink-0">{grp.emoji}</span>
+                    <div className="min-w-0 text-neutral-200 leading-snug">
+                      <span>{grp.words}</span>
+                      {grp.example && (
+                        <span className="block text-[10px] text-amber-300/90 mt-0.5">
+                          напр.: «{grp.example}»
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

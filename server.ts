@@ -42,17 +42,42 @@ interface ServerRoomState extends RoomState {
   creatorIp?: string;
   chatMediaFiles: ChatMediaEntry[];
   chatMediaTotalBytes: number;
+  lastActivityAt: number;
 }
 
 const MAX_CHAT_MEDIA_FILE_SIZE = 10 * 1024 * 1024; // 10 MB per file
 const MAX_CHAT_MEDIA_ROOM_TOTAL = 100 * 1024 * 1024; // 100 MB total per room
+const MAX_PLAYLIST_FILE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB max per video
+const MAX_ROOM_PLAYLIST_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB total playlist quota per room
+const NEVER_JOINED_ROOM_TTL_MS = 5 * 60 * 1000; // 5 min TTL if room created but never joined
+const ROOM_IDLE_TTL_MS = 3 * 60 * 60 * 1000; // 3 hours idle TTL
+
+const SAFE_ROOM_ID_RE = /^[a-z0-9_-]{3,24}$/;
+const SAFE_FILE_ID_RE = /^[a-zA-Z0-9_-]{4,64}$/;
+
+function isValidRoomId(roomId: unknown): roomId is string {
+  return typeof roomId === 'string' && SAFE_ROOM_ID_RE.test(roomId);
+}
+
+function isValidFileId(fileId: unknown): fileId is string {
+  return typeof fileId === 'string' && SAFE_FILE_ID_RE.test(fileId);
+}
+
+function getRoomPlaylistBytes(room: ServerRoomState): number {
+  return room.playlist.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+}
 
 // In-memory room store
 const rooms = new Map<string, ServerRoomState>();
 
-// Helper to get or create room storage directory
+// Helper to get or create room storage directory safely
 function getRoomStorageDir(roomId: string): string {
-  const dir = path.join(STORAGE_BASE_DIR, roomId);
+  const baseResolved = path.resolve(STORAGE_BASE_DIR);
+  const safeId = path.basename(roomId);
+  const dir = path.resolve(baseResolved, safeId);
+  if (!dir.startsWith(baseResolved + path.sep)) {
+    throw new Error('Invalid room storage path');
+  }
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -60,7 +85,8 @@ function getRoomStorageDir(roomId: string): string {
 }
 
 function getRoomChatMediaDir(roomId: string): string {
-  const dir = path.join(getRoomStorageDir(roomId), 'chat_media');
+  const roomDir = getRoomStorageDir(roomId);
+  const dir = path.join(roomDir, 'chat_media');
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -120,77 +146,75 @@ function sanitizeReplyTo(raw: unknown): ChatReplyRef | undefined {
   };
 }
 
-const REPLY_ACTION_TEMPLATES: Record<string, (actor: string, target: string) => string> = {
-  поцеловать: (a, t) => `💋 ${a} поцеловал ${t}`,
-  поцелуй: (a, t) => `💋 ${a} поцеловал ${t}`,
-  чмок: (a, t) => `💋 ${a} чмокнул ${t}`,
-  чмокнуть: (a, t) => `💋 ${a} чмокнул ${t}`,
-  обнять: (a, t) => `🫂 ${a} обнял ${t}`,
-  обними: (a, t) => `🫂 ${a} обнял ${t}`,
-  обнимаю: (a, t) => `🫂 ${a} обнял ${t}`,
-  обнимашки: (a, t) => `🫂 ${a} крепко обнял ${t}`,
-  погладить: (a, t) => `🥹 ${a} погладил по голове ${t}`,
-  погладь: (a, t) => `🥹 ${a} погладил по голове ${t}`,
-  глажу: (a, t) => `🥹 ${a} погладил по голове ${t}`,
-  ударить: (a, t) => `💥 ${a} ударил ${t}`,
-  стукнуть: (a, t) => `💥 ${a} стукнул ${t}`,
-  треснуть: (a, t) => `💥 ${a} треснул ${t}`,
-  бонк: (a, t) => `🔨 ${a} бонкнул ${t}`,
-  пнуть: (a, t) => `🦶 ${a} пнул ${t}`,
-  пинок: (a, t) => `🦶 ${a} пнул ${t}`,
-  шлепнуть: (a, t) => `👋 ${a} шлёпнул ${t}`,
-  укусить: (a, t) => `🦷 ${a} укусил ${t}`,
-  кусь: (a, t) => `🦷 ${a} сделал кусь ${t}`,
-  куснуть: (a, t) => `🦷 ${a} укусил ${t}`,
-  лизнуть: (a, t) => `👅 ${a} лизнул ${t}`,
-  лизь: (a, t) => `👅 ${a} лизнул ${t}`,
-  покормить: (a, t) => `🍿 ${a} покормил ${t}`,
-  покорми: (a, t) => `🍿 ${a} покормил ${t}`,
-  'дать пять': (a, t) => `🙌 ${a} дал пять ${t}`,
-  'дай пять': (a, t) => `🙌 ${a} дал пять ${t}`,
-  пятюня: (a, t) => `🙌 ${a} дал пять ${t}`,
-  'пожать руку': (a, t) => `🤝 ${a} пожал руку ${t}`,
-  'жму руку': (a, t) => `🤝 ${a} пожал руку ${t}`,
-  подмигнуть: (a, t) => `😉 ${a} подмигнул ${t}`,
-  улыбнуться: (a, t) => `😊 ${a} улыбнулся ${t}`,
-  похлопать: (a, t) => `👏 ${a} похлопал ${t}`,
-  аплодисменты: (a, t) => `👏 ${a} поаплодировал ${t}`,
-  похвалить: (a, t) => `🌟 ${a} похвалил ${t}`,
-  молодец: (a, t) => `🌟 ${a} похвалил ${t}`,
-  утешить: (a, t) => `❤️‍🩹 ${a} утешил ${t}`,
-  пожалеть: (a, t) => `❤️‍🩹 ${a} пожалел ${t}`,
-  поблагодарить: (a, t) => `🙏 ${a} поблагодарил ${t}`,
-  спасибо: (a, t) => `🙏 ${a} поблагодарил ${t}`,
-  извиниться: (a, t) => `🙇 ${a} извинился перед ${t}`,
-  прости: (a, t) => `🙇 ${a} попросил прощения у ${t}`,
-  извини: (a, t) => `🙇 ${a} извинился перед ${t}`,
-  'подарить цветы': (a, t) => `💐 ${a} подарил цветы ${t}`,
-  цветы: (a, t) => `💐 ${a} подарил цветы ${t}`,
-  чокнуться: (a, t) => `🥂 ${a} чокнулся с ${t}`,
-  выпить: (a, t) => `🥂 ${a} выпил с ${t}`,
-  разбудить: (a, t) => `⏰ ${a} разбудил ${t}`,
-  проснись: (a, t) => `⏰ ${a} разбудил ${t}`,
+const REPLY_ACTION_TEMPLATES: Record<string, (actor: string, target: string, tail?: string) => string> = {
+  поцеловать: (a, t, tail) => (tail ? `💋 ${a} поцеловал ${t} ${tail}` : `💋 ${a} поцеловал ${t}`),
+  поцелуй: (a, t, tail) => (tail ? `💋 ${a} поцеловал ${t} ${tail}` : `💋 ${a} поцеловал ${t}`),
+  чмок: (a, t, tail) => (tail ? `💋 ${a} чмокнул ${t} ${tail}` : `💋 ${a} чмокнул ${t}`),
+  чмокнуть: (a, t, tail) => (tail ? `💋 ${a} чмокнул ${t} ${tail}` : `💋 ${a} чмокнул ${t}`),
+  обнять: (a, t, tail) => (tail ? `🫂 ${a} обнял ${t} ${tail}` : `🫂 ${a} обнял ${t}`),
+  обними: (a, t, tail) => (tail ? `🫂 ${a} обнял ${t} ${tail}` : `🫂 ${a} обнял ${t}`),
+  обнимаю: (a, t, tail) => (tail ? `🫂 ${a} обнял ${t} ${tail}` : `🫂 ${a} обнял ${t}`),
+  обнимашки: (a, t, tail) => (tail ? `🫂 ${a} крепко обнял ${t} ${tail}` : `🫂 ${a} крепко обнял ${t}`),
+  погладить: (a, t, tail) => (tail ? `🥹 ${a} погладил ${t} ${tail}` : `🥹 ${a} погладил по голове ${t}`),
+  погладь: (a, t, tail) => (tail ? `🥹 ${a} погладил ${t} ${tail}` : `🥹 ${a} погладил по голове ${t}`),
+  глажу: (a, t, tail) => (tail ? `🥹 ${a} погладил ${t} ${tail}` : `🥹 ${a} погладил по голове ${t}`),
+  ударить: (a, t, tail) => (tail ? `💥 ${a} ударил ${t} ${tail}` : `💥 ${a} ударил ${t}`),
+  стукнуть: (a, t, tail) => (tail ? `💥 ${a} стукнул ${t} ${tail}` : `💥 ${a} стукнул ${t}`),
+  треснуть: (a, t, tail) => (tail ? `💥 ${a} треснул ${t} ${tail}` : `💥 ${a} треснул ${t}`),
+  бонк: (a, t, tail) => (tail ? `🔨 ${a} бонкнул ${t} ${tail}` : `🔨 ${a} бонкнул ${t}`),
+  пнуть: (a, t, tail) => (tail ? `🦶 ${a} пнул ${t} ${tail}` : `🦶 ${a} пнул ${t}`),
+  пинок: (a, t, tail) => (tail ? `🦶 ${a} пнул ${t} ${tail}` : `🦶 ${a} пнул ${t}`),
+  шлепнуть: (a, t, tail) => (tail ? `👋 ${a} шлёпнул ${t} ${tail}` : `👋 ${a} шлёпнул ${t}`),
+  укусить: (a, t, tail) => (tail ? `🦷 ${a} укусил ${t} ${tail}` : `🦷 ${a} укусил ${t}`),
+  кусь: (a, t, tail) => (tail ? `🦷 ${a} сделал кусь ${t} ${tail}` : `🦷 ${a} сделал кусь ${t}`),
+  куснуть: (a, t, tail) => (tail ? `🦷 ${a} укусил ${t} ${tail}` : `🦷 ${a} укусил ${t}`),
+  лизнуть: (a, t, tail) => (tail ? `👅 ${a} лизнул ${t} ${tail}` : `👅 ${a} лизнул ${t}`),
+  лизь: (a, t, tail) => (tail ? `👅 ${a} лизнул ${t} ${tail}` : `👅 ${a} лизнул ${t}`),
+  покормить: (a, t, tail) => (tail ? `🍿 ${a} покормил ${t} ${tail}` : `🍿 ${a} покормил ${t}`),
+  покорми: (a, t, tail) => (tail ? `🍿 ${a} покормил ${t} ${tail}` : `🍿 ${a} покормил ${t}`),
+  'дать пять': (a, t, tail) => (tail ? `🙌 ${a} дал пять ${t} ${tail}` : `🙌 ${a} дал пять ${t}`),
+  'дай пять': (a, t, tail) => (tail ? `🙌 ${a} дал пять ${t} ${tail}` : `🙌 ${a} дал пять ${t}`),
+  пятюня: (a, t, tail) => (tail ? `🙌 ${a} дал пять ${t} ${tail}` : `🙌 ${a} дал пять ${t}`),
+  'пожать руку': (a, t, tail) => (tail ? `🤝 ${a} пожал руку ${t} ${tail}` : `🤝 ${a} пожал руку ${t}`),
+  'жму руку': (a, t, tail) => (tail ? `🤝 ${a} пожал руку ${t} ${tail}` : `🤝 ${a} пожал руку ${t}`),
+  подмигнуть: (a, t, tail) => (tail ? `😉 ${a} подмигнул ${t} ${tail}` : `😉 ${a} подмигнул ${t}`),
+  улыбнуться: (a, t, tail) => (tail ? `😊 ${a} улыбнулся ${t} ${tail}` : `😊 ${a} улыбнулся ${t}`),
+  похлопать: (a, t, tail) => (tail ? `👏 ${a} похлопал ${t} ${tail}` : `👏 ${a} похлопал ${t}`),
+  аплодисменты: (a, t, tail) => (tail ? `👏 ${a} поаплодировал ${t} ${tail}` : `👏 ${a} поаплодировал ${t}`),
+  похвалить: (a, t, tail) => (tail ? `🌟 ${a} похвалил ${t} ${tail}` : `🌟 ${a} похвалил ${t}`),
+  молодец: (a, t, tail) => (tail ? `🌟 ${a} похвалил ${t} ${tail}` : `🌟 ${a} похвалил ${t}`),
+  утешить: (a, t, tail) => (tail ? `❤️‍🩹 ${a} утешил ${t} ${tail}` : `❤️‍🩹 ${a} утешил ${t}`),
+  пожалеть: (a, t, tail) => (tail ? `❤️‍🩹 ${a} пожалел ${t} ${tail}` : `❤️‍🩹 ${a} пожалел ${t}`),
+  поблагодарить: (a, t, tail) => (tail ? `🙏 ${a} поблагодарил ${t} ${tail}` : `🙏 ${a} поблагодарил ${t}`),
+  спасибо: (a, t, tail) => (tail ? `🙏 ${a} поблагодарил ${t} ${tail}` : `🙏 ${a} поблагодарил ${t}`),
+  извиниться: (a, t, tail) => (tail ? `🙇 ${a} извинился перед ${t} ${tail}` : `🙇 ${a} извинился перед ${t}`),
+  прости: (a, t, tail) => (tail ? `🙇 ${a} попросил прощения у ${t} ${tail}` : `🙇 ${a} попросил прощения у ${t}`),
+  извини: (a, t, tail) => (tail ? `🙇 ${a} извинился перед ${t} ${tail}` : `🙇 ${a} извинился перед ${t}`),
+  'подарить цветы': (a, t, tail) => (tail ? `💐 ${a} подарил цветы ${t} ${tail}` : `💐 ${a} подарил цветы ${t}`),
+  цветы: (a, t, tail) => (tail ? `💐 ${a} подарил цветы ${t} ${tail}` : `💐 ${a} подарил цветы ${t}`),
+  чокнуться: (a, t, tail) => (tail ? `🥂 ${a} чокнулся с ${t} ${tail}` : `🥂 ${a} чокнулся с ${t}`),
+  выпить: (a, t, tail) => (tail ? `🥂 ${a} выпил с ${t} ${tail}` : `🥂 ${a} выпил с ${t}`),
+  разбудить: (a, t, tail) => (tail ? `⏰ ${a} разбудил ${t} ${tail}` : `⏰ ${a} разбудил ${t}`),
+  проснись: (a, t, tail) => (tail ? `⏰ ${a} разбудил ${t} ${tail}` : `⏰ ${a} разбудил ${t}`),
   люблю: (a, t) => `❤️ ${a} признался в любви ${t}`,
 };
 
-const HELP_TRIGGERS_TEXT = [
-  '📖 Слова-триггеры (нажмите на сообщение участника и ответьте):',
-  '💋 поцеловать, поцелуй, чмок, чмокнуть',
-  '🫂 обнять, обними, обнимаю, обнимашки',
-  '🥹 погладить, погладь, глажу',
-  '💥 ударить, стукнуть, треснуть, бонк',
-  '🦶 пнуть, пинок  •  👋 шлепнуть',
-  '🦷 укусить, кусь, куснуть  •  👅 лизнуть, лизь',
-  '🍿 покормить, покорми  •  💐 подарить цветы, цветы',
-  '🙌 дать пять, дай пять, пятюня  •  🤝 пожать руку, жму руку',
-  '😉 подмигнуть  •  😊 улыбнуться  •  👏 похлопать, аплодисменты',
-  '🌟 похвалить, молодец  •  ❤️‍🩹 утешить, пожалеть',
-  '🙏 поблагодарить, спасибо  •  🙇 извиниться, прости, извини',
-  '🥂 чокнуться, выпить  •  ⏰ разбудить, проснись  •  ❤️ люблю',
-].join('\n');
+function sanitizeActionTail(rawTail: string): string | undefined {
+  let clean = rawTail
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[.,!?;:()\s]+|[.,!?;:\s]+$/g, '')
+    .trim();
+  clean = clean.replace(/^(?:тебя|вас)(?:\s+|$)/i, '').trim();
+  if (!clean) return undefined;
+  const words = clean.split(' ');
+  if (words.length > 6) return undefined;
+  return clean.slice(0, 60);
+}
 
 function buildReplyActionText(actorNick: string, targetNick: string, text: string): string | null {
-  const norm = text
+  const rawClean = text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const norm = rawClean
     .toLowerCase()
     .replace(/ё/g, 'е')
     .replace(/[.,!?;:()\[\]"'«»~*]+/g, ' ')
@@ -201,6 +225,31 @@ function buildReplyActionText(actorNick: string, targetNick: string, text: strin
   const exactBuilder = REPLY_ACTION_TEMPLATES[norm];
   if (exactBuilder) {
     return exactBuilder(actorNick, targetNick);
+  }
+
+  // Match prefix trigger + arbitrary continuation (e.g., "поцеловать в щеку", "укусить за ушко")
+  const rawTokens = rawClean.split(' ');
+  const normTokens = rawTokens.map((tok) =>
+    tok
+      .toLowerCase()
+      .replace(/ё/g, 'е')
+      .replace(/^[.,!?;:()\[\]"'«»~*]+|[.,!?;:()\[\]"'«»~*]+$/g, '')
+  );
+
+  if (rawTokens.length <= 8) {
+    if (normTokens.length >= 2) {
+      const bigramPrefix = `${normTokens[0]} ${normTokens[1]}`;
+      const bigramBuilder = REPLY_ACTION_TEMPLATES[bigramPrefix];
+      if (bigramBuilder) {
+        const tail = sanitizeActionTail(rawTokens.slice(2).join(' '));
+        return bigramBuilder(actorNick, targetNick, tail);
+      }
+    }
+    const singlePrefixBuilder = REPLY_ACTION_TEMPLATES[normTokens[0]];
+    if (singlePrefixBuilder) {
+      const tail = sanitizeActionTail(rawTokens.slice(1).join(' '));
+      return singlePrefixBuilder(actorNick, targetNick, tail);
+    }
   }
 
   const words = norm.split(' ');
@@ -223,6 +272,10 @@ function buildReplyActionText(actorNick: string, targetNick: string, text: strin
 const storage = multer.diskStorage({
   destination: (req, _file, cb) => {
     const roomId = req.params.roomId;
+    if (!isValidRoomId(roomId)) {
+      cb(new Error('Некорректный ID комнаты'), '');
+      return;
+    }
     const roomDir = getRoomStorageDir(roomId);
     cb(null, roomDir);
   },
@@ -236,13 +289,17 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: {
-    fileSize: 2 * 1024 * 1024 * 1024, // 2 GB limit per file
+    fileSize: MAX_PLAYLIST_FILE_BYTES, // 2 GB limit per file
   },
 });
 
 const chatMediaStorage = multer.diskStorage({
   destination: (req, _file, cb) => {
     const roomId = req.params.roomId;
+    if (!isValidRoomId(roomId)) {
+      cb(new Error('Некорректный ID комнаты'), '');
+      return;
+    }
     const mediaDir = getRoomChatMediaDir(roomId);
     cb(null, mediaDir);
   },
@@ -332,15 +389,18 @@ function purgeRoom(roomId: string, reason = 'Комната закрыта. Вс
   }
 
   // Asynchronously purge room directory on disk without blocking the event loop
-  const roomDir = path.join(STORAGE_BASE_DIR, roomId);
-  fsPromises
-    .rm(roomDir, { recursive: true, force: true })
-    .then(() => {
-      console.log(`[WatchParty] Хранилище очищено для комнаты ${roomId}`);
-    })
-    .catch((err) => {
-      console.error(`Ошибка при удалении хранилища комнаты ${roomId}:`, err);
-    });
+  const baseResolved = path.resolve(STORAGE_BASE_DIR);
+  const roomDir = path.resolve(baseResolved, path.basename(roomId));
+  if (roomDir.startsWith(baseResolved + path.sep)) {
+    fsPromises
+      .rm(roomDir, { recursive: true, force: true })
+      .then(() => {
+        console.log(`[WatchParty] Хранилище очищено для комнаты ${roomId}`);
+      })
+      .catch((err) => {
+        console.error(`Ошибка при удалении хранилища комнаты ${roomId}:`, err);
+      });
+  }
 
   chatMessageRegistry.delete(roomId);
   roomFloatingEmojis.delete(roomId);
@@ -359,17 +419,30 @@ setInterval(async () => {
       );
       uploadSessions.delete(fileId);
 
-      const roomDir = getRoomStorageDir(session.roomId);
-      const partPath = path.join(roomDir, `${fileId}.part`);
-
-      try {
-        await fsPromises.unlink(partPath).catch(() => {});
-      } catch (err) {
-        console.error(`[Auto-Cleanup] Ошибка удаления файлов для ${fileId}:`, err);
+      if (isValidRoomId(session.roomId) && isValidFileId(fileId)) {
+        const roomDir = getRoomStorageDir(session.roomId);
+        const partPath = path.join(roomDir, `${fileId}.part`);
+        try {
+          await fsPromises.unlink(partPath).catch(() => {});
+        } catch (err) {
+          console.error(`[Auto-Cleanup] Ошибка удаления файлов для ${fileId}:`, err);
+        }
       }
     }
   }
 }, 15000);
+
+// Auto-cleanup forgotten idle rooms (3 hours without activity and no active upload)
+setInterval(() => {
+  const now = Date.now();
+  for (const [rId, room] of rooms.entries()) {
+    if (room.activeUpload) continue;
+    if (now - room.lastActivityAt > ROOM_IDLE_TTL_MS) {
+      console.log(`[Idle-Cleanup] Закрытие неактивной комнаты ${rId}`);
+      purgeRoom(rId, 'Комната закрыта из-за длительного бездействия.');
+    }
+  }
+}, 5 * 60 * 1000);
 
 // -----------------------------------------------------------------------------
 // REST API Endpoints
@@ -417,7 +490,17 @@ app.post('/api/rooms/create', (req, res) => {
     activeUpload: null,
     chatMediaFiles: [],
     chatMediaTotalBytes: 0,
+    lastActivityAt: Date.now(),
   };
+
+  // Auto-purge if creator never connects via WebSocket within 5 minutes
+  newRoom.emptyTimeoutId = setTimeout(() => {
+    const current = rooms.get(roomId);
+    if (current && Object.keys(current.users).length === 0) {
+      console.log(`[TTL] Удалена неактивированная комната ${roomId}`);
+      purgeRoom(roomId, 'Время ожидания входа в комнату истекло.');
+    }
+  }, NEVER_JOINED_ROOM_TTL_MS);
 
   rooms.set(roomId, newRoom);
   getRoomStorageDir(roomId);
@@ -435,6 +518,10 @@ app.post('/api/rooms/create', (req, res) => {
 // Room details
 app.get('/api/rooms/:roomId', (req, res) => {
   const { roomId } = req.params;
+  if (!isValidRoomId(roomId)) {
+    res.status(400).json({ error: 'Некорректный ID комнаты' });
+    return;
+  }
   const room = rooms.get(roomId);
   if (!room) {
     res.status(404).json({ error: 'Комната не найдена' });
@@ -451,7 +538,28 @@ app.get('/api/rooms/:roomId', (req, res) => {
 });
 
 // Upload video files to a room
-app.post('/api/rooms/:roomId/upload', upload.array('videos', 10), (req, res) => {
+app.post('/api/rooms/:roomId/upload', (req, res, next) => {
+  const { roomId } = req.params;
+  if (!isValidRoomId(roomId)) {
+    res.status(400).json({ error: 'Некорректный ID комнаты' });
+    return;
+  }
+  const room = rooms.get(roomId);
+  if (!room) {
+    res.status(404).json({ error: 'Комната не найдена' });
+    return;
+  }
+  const token = req.headers['x-host-token'] || req.query.token;
+  const socketId = req.headers['x-socket-id'] || req.query.socketId;
+  const isAuthorized =
+    (token && token === room.hostToken) ||
+    (socketId && socketId === room.hostId);
+  if (!isAuthorized) {
+    res.status(403).json({ error: 'Только хост может загружать видео' });
+    return;
+  }
+  next();
+}, upload.array('videos', 10), async (req, res) => {
   const { roomId } = req.params;
   const room = rooms.get(roomId);
 
@@ -460,25 +568,20 @@ app.post('/api/rooms/:roomId/upload', upload.array('videos', 10), (req, res) => 
     return;
   }
 
-  const token = req.headers['x-host-token'] || req.query.token || req.body.token;
-  const socketId = req.headers['x-socket-id'] || req.query.socketId || req.body.socketId;
-
-  // Verify host permissions
-  const isAuthorized =
-    (token && token === room.hostToken) ||
-    (socketId && socketId === room.hostId) ||
-    Object.keys(room.users).length === 0;
-
-  if (!isAuthorized) {
-    res.status(403).json({ error: 'Только хост может загружать видео' });
-    return;
-  }
-
   const files = (req.files as Express.Multer.File[]) || [];
   if (files.length === 0) {
     res.status(400).json({ error: 'Файлы не были переданы' });
     return;
   }
+
+  const incomingBytes = files.reduce((sum, f) => sum + f.size, 0);
+  if (getRoomPlaylistBytes(room) + incomingBytes > MAX_ROOM_PLAYLIST_BYTES) {
+    await Promise.all(files.map((f) => fsPromises.unlink(f.path).catch(() => {})));
+    res.status(413).json({ error: 'Превышен общий лимит плейлиста комнаты (2 ГБ)' });
+    return;
+  }
+
+  room.lastActivityAt = Date.now();
 
   const newItems: PlaylistItem[] = [];
 
@@ -525,6 +628,10 @@ app.post('/api/rooms/:roomId/upload', upload.array('videos', 10), (req, res) => 
 // Check upload status of a file for concurrent chunked upload
 app.get('/api/rooms/:roomId/upload/status/:fileId', async (req, res) => {
   const { roomId, fileId } = req.params;
+  if (!isValidRoomId(roomId) || !isValidFileId(fileId)) {
+    res.status(400).json({ error: 'Некорректные параметры запроса' });
+    return;
+  }
   const room = rooms.get(roomId);
   if (!room) {
     res.status(404).json({ error: 'Комната не найдена' });
@@ -588,6 +695,10 @@ app.get('/api/rooms/:roomId/upload/status/:fileId', async (req, res) => {
 // Concurrent Chunked Upload with fully async Zero-Copy streaming disk I/O and race condition protection
 app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
   const { roomId } = req.params;
+  if (!isValidRoomId(roomId)) {
+    res.status(400).json({ error: 'Некорректный ID комнаты' });
+    return;
+  }
   const room = rooms.get(roomId);
   if (!room) {
     res.status(404).json({ error: 'Комната не найдена' });
@@ -599,8 +710,7 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
 
   const isAuthorized =
     (token && token === room.hostToken) ||
-    (socketId && socketId === room.hostId) ||
-    Object.keys(room.users).length === 0;
+    (socketId && socketId === room.hostId);
 
   if (!isAuthorized) {
     res.status(403).json({ error: 'Только хост может загружать видео' });
@@ -608,17 +718,47 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
   }
 
   const fileId = req.headers['x-file-id'] as string;
-  if (!fileId) {
-    res.status(400).json({ error: 'Missing x-file-id' });
+  if (!isValidFileId(fileId)) {
+    res.status(400).json({ error: 'Некорректный x-file-id' });
     return;
   }
 
   const rawFileName = (req.headers['x-file-name'] as string) || 'video.mp4';
-  const fileName = decodeURIComponent(rawFileName);
-  const totalSize = parseInt((req.headers['x-file-size'] as string) || '0', 10);
-  const chunkOffset = parseInt((req.headers['x-chunk-offset'] as string) || '0', 10);
-  const chunkIndex = parseInt((req.headers['x-chunk-index'] as string) || '0', 10);
-  const totalChunks = parseInt((req.headers['x-total-chunks'] as string) || '1', 10);
+  let fileName = 'video.mp4';
+  try {
+    fileName = path.basename(decodeURIComponent(rawFileName)).slice(0, 180) || 'video.mp4';
+  } catch {
+    fileName = 'video.mp4';
+  }
+  const totalSize = Number(req.headers['x-file-size'] || '0');
+  const chunkOffset = Number(req.headers['x-chunk-offset'] || '0');
+  const chunkIndex = Number(req.headers['x-chunk-index'] || '0');
+  const totalChunks = Number(req.headers['x-total-chunks'] || '1');
+
+  if (
+    !Number.isInteger(totalSize) ||
+    totalSize <= 0 ||
+    totalSize > MAX_PLAYLIST_FILE_BYTES ||
+    !Number.isInteger(totalChunks) ||
+    totalChunks < 1 ||
+    totalChunks > 5000 ||
+    !Number.isInteger(chunkIndex) ||
+    chunkIndex < 0 ||
+    chunkIndex >= totalChunks ||
+    !Number.isInteger(chunkOffset) ||
+    chunkOffset < 0 ||
+    chunkOffset >= totalSize
+  ) {
+    res.status(400).json({ error: 'Некорректные параметры чанка' });
+    return;
+  }
+
+  if (getRoomPlaylistBytes(room) + totalSize > MAX_ROOM_PLAYLIST_BYTES) {
+    res.status(413).json({ error: 'Превышен общий лимит плейлиста комнаты (2 ГБ)' });
+    return;
+  }
+
+  room.lastActivityAt = Date.now();
 
   const roomDir = getRoomStorageDir(roomId);
   const partPath = path.join(roomDir, `${fileId}.part`);
@@ -684,9 +824,17 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
 
   writeStream.on('finish', async () => {
     try {
-      if (!session) return;
+      if (!session || !rooms.has(roomId) || !uploadSessions.has(fileId)) {
+        await fsPromises.unlink(partPath).catch(() => {});
+        if (!res.headersSent) {
+          res.status(409).json({ error: 'Загрузка была отменена или комната закрыта' });
+        }
+        return;
+      }
+
       session.completedChunks.add(chunkIndex);
       session.lastActivity = Date.now();
+      room.lastActivityAt = Date.now();
 
       // Finalize ONLY when every single chunk has completed, strictly guarded against race conditions
       const isAllCompleted = session.completedChunks.size === totalChunks;
@@ -778,6 +926,10 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
 // Cancel in-flight chunked upload and immediately delete .part files asynchronously
 app.post('/api/rooms/:roomId/upload/cancel/:fileId', async (req, res) => {
   const { roomId, fileId } = req.params;
+  if (!isValidRoomId(roomId) || !isValidFileId(fileId)) {
+    res.status(400).json({ error: 'Некорректные параметры запроса' });
+    return;
+  }
   const room = rooms.get(roomId);
   if (!room) {
     res.status(404).json({ error: 'Комната не найдена' });
@@ -789,8 +941,7 @@ app.post('/api/rooms/:roomId/upload/cancel/:fileId', async (req, res) => {
 
   const isAuthorized =
     (token && token === room.hostToken) ||
-    (socketId && socketId === room.hostId) ||
-    Object.keys(room.users).length === 0;
+    (socketId && socketId === room.hostId);
 
   if (!isAuthorized) {
     res.status(403).json({ error: 'Только хост может отменять загрузку' });
@@ -818,6 +969,10 @@ app.post('/api/rooms/:roomId/upload/cancel/:fileId', async (req, res) => {
 // Upload chat media (10 MB per file limit, 100 MB FIFO room quota)
 app.post('/api/rooms/:roomId/chat/upload', (req, res) => {
   const { roomId } = req.params;
+  if (!isValidRoomId(roomId)) {
+    res.status(400).json({ error: 'Некорректный ID комнаты' });
+    return;
+  }
   const room = rooms.get(roomId);
   if (!room) {
     res.status(404).json({ error: 'Комната не найдена' });
@@ -830,6 +985,7 @@ app.post('/api/rooms/:roomId/chat/upload', (req, res) => {
     res.status(403).json({ error: 'Только участники комнаты могут отправлять медиа в чат' });
     return;
   }
+  room.lastActivityAt = Date.now();
 
   chatMediaUpload.single('media')(req, res, async (err) => {
     if (err) {
@@ -943,6 +1099,10 @@ app.post('/api/rooms/:roomId/chat/upload', (req, res) => {
 // Serve chat media with HTTP 206 support
 app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
   const { roomId, filename } = req.params;
+  if (!isValidRoomId(roomId)) {
+    res.status(400).send('Invalid room ID');
+    return;
+  }
   const safeFilename = path.basename(filename);
   const mediaDir = path.resolve(STORAGE_BASE_DIR, path.basename(roomId), 'chat_media');
   const filePath = path.resolve(mediaDir, safeFilename);
@@ -1023,6 +1183,10 @@ app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
 // Stream video via HTTP 206 Partial Content (async non-blocking stat + 256KB buffer)
 app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
   const { roomId, fileId } = req.params;
+  if (!isValidRoomId(roomId)) {
+    res.status(400).send('Invalid room ID');
+    return;
+  }
   const roomDir = path.resolve(STORAGE_BASE_DIR, path.basename(roomId));
   let filePath = path.resolve(roomDir, path.basename(fileId));
 
@@ -1126,14 +1290,22 @@ io.on('connection', (socket) => {
 
   // Join Room
   socket.on('room:join', ({ roomId, nickname, hostToken }) => {
-    currentRoomId = roomId;
-    socket.join(roomId);
+    const cleanRoomId = typeof roomId === 'string' ? roomId.trim().toLowerCase() : '';
+    if (!isValidRoomId(cleanRoomId)) {
+      socket.emit('error:notification', {
+        message: 'Некорректный ID комнаты (допустимы латинские буквы, цифры, _ и - от 3 до 24 символов).',
+      });
+      return;
+    }
 
-    let room = rooms.get(roomId);
+    currentRoomId = cleanRoomId;
+    socket.join(cleanRoomId);
+
+    let room = rooms.get(cleanRoomId);
     if (!room) {
       // Auto-create room if joining direct link
       room = {
-        roomId,
+        roomId: cleanRoomId,
         hostId: socket.id,
         hostToken: hostToken || uuidv4(),
         users: {},
@@ -1149,9 +1321,10 @@ io.on('connection', (socket) => {
         activeUpload: null,
         chatMediaFiles: [],
         chatMediaTotalBytes: 0,
+        lastActivityAt: Date.now(),
       };
-      rooms.set(roomId, room);
-      getRoomStorageDir(roomId);
+      rooms.set(cleanRoomId, room);
+      getRoomStorageDir(cleanRoomId);
     }
 
     // Cancel cleanup timer if active
@@ -1159,6 +1332,7 @@ io.on('connection', (socket) => {
       clearTimeout(room.emptyTimeoutId);
       room.emptyTimeoutId = null;
     }
+    room.lastActivityAt = Date.now();
 
     const isFirstUser = Object.keys(room.users).length === 0;
     const isTokenMatch = Boolean(hostToken && hostToken === room.hostToken);
@@ -1180,13 +1354,13 @@ io.on('connection', (socket) => {
 
     room.users[socket.id] = newUser;
 
-    // Send full state to the joined user
-    socket.emit('room:init_state', room);
+    // Send state without NodeJS.Timeout handle
+    socket.emit('room:init_state', { ...room, emptyTimeoutId: null });
 
     // Notify other users
-    socket.to(roomId).emit('room:user_joined', newUser);
+    socket.to(cleanRoomId).emit('room:user_joined', newUser);
 
-    io.to(roomId).emit('chat:message', {
+    io.to(cleanRoomId).emit('chat:message', {
       id: uuidv4(),
       userId: 'system',
       nickname: 'Система',
@@ -1270,6 +1444,7 @@ io.on('connection', (socket) => {
     const room = rooms.get(currentRoomId);
     if (!room || room.hostId !== socket.id) return;
 
+    room.lastActivityAt = Date.now();
     room.playbackState.isPlaying = true;
     room.playbackState.currentTime = currentTime;
     room.playbackState.lastUpdatedServerTime = Date.now();
@@ -1287,6 +1462,7 @@ io.on('connection', (socket) => {
     const room = rooms.get(currentRoomId);
     if (!room || room.hostId !== socket.id) return;
 
+    room.lastActivityAt = Date.now();
     room.playbackState.isPlaying = false;
     room.playbackState.currentTime = currentTime;
     room.playbackState.lastUpdatedServerTime = Date.now();
@@ -1302,6 +1478,7 @@ io.on('connection', (socket) => {
     const room = rooms.get(currentRoomId);
     if (!room || room.hostId !== socket.id) return;
 
+    room.lastActivityAt = Date.now();
     room.playbackState.currentTime = targetTime;
     room.playbackState.lastUpdatedServerTime = Date.now();
 
@@ -1394,7 +1571,7 @@ io.on('connection', (socket) => {
   });
 
   // Host: Delete Track
-  socket.on('host:delete_track', ({ fileId }) => {
+  socket.on('host:delete_track', async ({ fileId }) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (!room || room.hostId !== socket.id) return;
@@ -1403,16 +1580,13 @@ io.on('connection', (socket) => {
     if (index === -1) return;
 
     const [deletedItem] = room.playlist.splice(index, 1);
+    room.lastActivityAt = Date.now();
 
-    // Delete local file if present
-    const roomDir = path.join(STORAGE_BASE_DIR, currentRoomId);
-    const filePath = path.join(roomDir, deletedItem.filename);
-    if (fs.existsSync(filePath)) {
-      try {
-        fs.unlinkSync(filePath);
-      } catch (err) {
-        console.error('Error deleting file:', err);
-      }
+    // Asynchronously delete local file if present (non-blocking on 0.1 vCPU)
+    const roomDir = getRoomStorageDir(currentRoomId);
+    const filePath = path.resolve(roomDir, path.basename(deletedItem.filename));
+    if (filePath.startsWith(roomDir + path.sep)) {
+      await fsPromises.unlink(filePath).catch(() => {});
     }
 
     // Adjust track index if needed
@@ -1551,6 +1725,7 @@ io.on('connection', (socket) => {
 
     const user = room.users[socket.id];
     if (!user) return;
+    room.lastActivityAt = Date.now();
 
     const cleanReplyTo = sanitizeReplyTo(replyTo);
 
@@ -1577,18 +1752,6 @@ io.on('connection', (socket) => {
 
     const cleanText = (text || '').trim().slice(0, 500);
     if (!cleanText) return;
-
-    if (cleanText.toLowerCase() === '/help') {
-      socket.emit('chat:message', {
-        id: uuidv4(),
-        userId: 'system',
-        nickname: 'Система',
-        text: HELP_TRIGGERS_TEXT,
-        timestamp: Date.now(),
-        type: 'system',
-      });
-      return;
-    }
 
     const messageId = uuidv4();
     const message: ChatMessage = {

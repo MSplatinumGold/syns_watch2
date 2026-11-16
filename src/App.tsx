@@ -23,7 +23,16 @@ import { ChatPanel } from './components/ChatPanel.tsx';
 import { PlaylistPanel } from './components/PlaylistPanel.tsx';
 import { ParticipantsPanel } from './components/ParticipantsPanel.tsx';
 import { JoinModal } from './components/JoinModal.tsx';
-import { MessageSquare, Film, Users, ChevronUp, ChevronDown, GripHorizontal } from 'lucide-react';
+import {
+  MessageSquare,
+  Film,
+  Users,
+  ChevronUp,
+  ChevronDown,
+  GripHorizontal,
+  AlertCircle,
+  X,
+} from 'lucide-react';
 
 export default function App() {
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -59,6 +68,7 @@ export default function App() {
   const [customViewportHeight, setCustomViewportHeight] = useState<number | null>(null);
   const [portraitVideoPercent, setPortraitVideoPercent] = useState<number>(30);
   const [isPortraitVideoCollapsed, setIsPortraitVideoCollapsed] = useState<boolean>(false);
+  const [appNotice, setAppNotice] = useState<{ type: 'error' | 'info'; text: string } | null>(null);
 
   const bestClockRttRef = useRef<number>(Infinity);
   const baselineViewportHeightRef = useRef<number>(
@@ -67,6 +77,25 @@ export default function App() {
   const lastOrientationRef = useRef<'portrait' | 'landscape' | null>(null);
   const portraitMainRef = useRef<HTMLElement>(null);
   const isResizingChatRef = useRef<boolean>(false);
+  const danmakuTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const emojiTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showAppNotice = useCallback((text: string, type: 'error' | 'info' = 'info') => {
+    setAppNotice({ type, text });
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = setTimeout(() => {
+      setAppNotice(null);
+      noticeTimerRef.current = null;
+    }, 6000);
+  }, []);
+
+  const clearOverlayTimers = useCallback(() => {
+    danmakuTimersRef.current.forEach(clearTimeout);
+    danmakuTimersRef.current.clear();
+    emojiTimersRef.current.forEach(clearTimeout);
+    emojiTimersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     const handleLayoutCheck = () => {
@@ -462,9 +491,9 @@ export default function App() {
 
     const typingTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
-    // Chat message received
+    // Chat message received (capped at 250 messages in memory for smooth scrolling)
     socket.on('chat:message', (message: ChatMessage) => {
-      setMessages((prev) => [...prev, message]);
+      setMessages((prev) => [...prev, message].slice(-250));
 
       if (message.type === 'message') {
         if (typingTimers[message.userId]) {
@@ -488,9 +517,11 @@ export default function App() {
         setDanmakuItems((prev) => [...prev, danmaku]);
 
         // Auto remove danmaku after 7 seconds
-        setTimeout(() => {
+        const timerId = setTimeout(() => {
+          danmakuTimersRef.current.delete(timerId);
           setDanmakuItems((prev) => prev.filter((item) => item.id !== danmaku.id));
         }, 7000);
+        danmakuTimersRef.current.add(timerId);
       }
 
       // Increment unread count if chat tab not currently open
@@ -565,9 +596,11 @@ export default function App() {
     // Small floating emoji reaction over video (max 5 active per room)
     socket.on('chat:floating_emoji', (item: FloatingEmojiItem) => {
       setFloatingEmojis((prev) => [...prev, item].slice(-5));
-      setTimeout(() => {
+      const timerId = setTimeout(() => {
+        emojiTimersRef.current.delete(timerId);
         setFloatingEmojis((prev) => prev.filter((f) => f.id !== item.id));
       }, 2500);
+      emojiTimersRef.current.add(timerId);
     });
 
     // Old chat media deleted due to 100 MB FIFO room limit
@@ -582,9 +615,14 @@ export default function App() {
       );
     });
 
+    // Server error notification
+    socket.on('error:notification', ({ message }) => {
+      if (message) showAppNotice(message, 'error');
+    });
+
     // Room closed by host or empty (Item 4)
     socket.on('room:closed', ({ reason }) => {
-      alert(reason || 'Комната была закрыта. Все файлы и данные удалены.');
+      showAppNotice(reason || 'Комната была закрыта. Все файлы и данные удалены.', 'info');
       handleLeaveRoom();
     });
 
@@ -592,10 +630,11 @@ export default function App() {
       pingTimeouts.forEach(clearTimeout);
       if (pingInterval) clearInterval(pingInterval);
       Object.values(typingTimers).forEach(clearTimeout);
+      clearOverlayTimers();
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [roomId, hasNickname, hostToken]);
+  }, [roomId, hasNickname, hostToken, showAppNotice, clearOverlayTimers]);
 
   // Create room flow via HTTP API
   const handleCreateRoom = async (nick: string) => {
@@ -605,22 +644,27 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nickname: nick }),
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (data.roomId) {
+        setAppNotice(null);
         setNickname(nick);
         setHostToken(data.hostToken);
         sessionStorage.setItem('watchparty_host_token', data.hostToken);
         setRoomId(data.roomId);
         window.history.pushState({}, '', `?room=${data.roomId}`);
+      } else {
+        throw new Error('Room ID missing');
       }
     } catch (err) {
       console.error('Error creating room:', err);
-      alert('Не удалось создать комнату. Попробуйте еще раз.');
+      showAppNotice('Не удалось создать комнату. Попробуйте еще раз.', 'error');
     }
   };
 
   // Join room flow
   const handleJoinRoom = (rId: string, nick: string) => {
+    setAppNotice(null);
     setNickname(nick);
     setRoomId(rId);
     window.history.pushState({}, '', `?room=${rId}`);
@@ -628,6 +672,7 @@ export default function App() {
 
   // Leave room flow
   const handleLeaveRoom = () => {
+    clearOverlayTimers();
     if (socketRef.current) {
       socketRef.current.disconnect();
     }
@@ -635,6 +680,7 @@ export default function App() {
     setRoomState(null);
     setMessages([]);
     setDanmakuItems([]);
+    setFloatingEmojis([]);
     setRoomUploadProgress(null);
     window.history.pushState({}, '', window.location.pathname);
   };
@@ -643,7 +689,7 @@ export default function App() {
   const handleCloseRoom = useCallback(() => {
     socketRef.current?.emit('host:close_room');
     handleLeaveRoom();
-  }, []);
+  }, [clearOverlayTimers]);
 
   // Switch tab and reset unread
   const handleSelectTab = (tab: 'chat' | 'playlist' | 'participants') => {
@@ -789,10 +835,40 @@ export default function App() {
     socketRef.current?.emit('user:set_prefix', { targetUserId, prefix });
   }, []);
 
+  const NoticeBanner = appNotice ? (
+    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] max-w-md w-[calc(100%-2rem)]">
+      <div
+        className={`px-3.5 py-2.5 rounded-xl border shadow-2xl backdrop-blur-md flex items-center justify-between gap-2.5 text-xs sm:text-sm font-medium ${
+          appNotice.type === 'error'
+            ? 'bg-rose-950/95 border-rose-500/50 text-rose-100'
+            : 'bg-neutral-900/95 border-neutral-700 text-neutral-100'
+        }`}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <AlertCircle
+            className={`w-4 h-4 shrink-0 ${
+              appNotice.type === 'error' ? 'text-rose-400' : 'text-amber-400'
+            }`}
+          />
+          <span className="break-words">{appNotice.text}</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => setAppNotice(null)}
+          className="p-1 rounded-lg hover:bg-white/10 text-neutral-400 hover:text-white cursor-pointer shrink-0"
+          title="Закрыть уведомление"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  ) : null;
+
   // Not in room -> Show Join/Create Modal
   if (!roomId || !nickname) {
     return (
       <div className="min-h-screen bg-neutral-950 flex flex-col justify-center items-center">
+        {NoticeBanner}
         <JoinModal
           initialRoomId={initialUrlRoomId}
           onCreateRoom={handleCreateRoom}
@@ -921,6 +997,8 @@ export default function App() {
       className="h-[100dvh] w-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans antialiased overflow-hidden select-none"
       style={customViewportHeight ? { height: `${customViewportHeight}px` } : undefined}
     >
+      {NoticeBanner}
+
       {/* 1. Header (Navbar): compact and responsive */}
       <Navbar
         roomId={roomId}
@@ -933,172 +1011,144 @@ export default function App() {
         onCloseRoom={handleCloseRoom}
       />
 
-      {/* 2. Responsive Orientation Layout (Item 3) */}
-      {isPortraitMode ? (
-        /* TABLET / MOBILE PORTRAIT: Adaptive resizable split + video-first typing mode */
-        <main ref={portraitMainRef} className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          {/* Resizable Video Player container (expands to fill space while typing so video stays clearly visible) */}
-          <div
-            className={`w-full bg-black overflow-hidden transition-[height] duration-150 ${
-              isTypingInPortraitChat
-                ? 'flex-1 min-h-0'
-                : isPortraitVideoCollapsed
-                ? 'shrink-0 h-0'
-                : 'shrink-0'
-            }`}
-            style={
-              isTypingInPortraitChat
+      {/* 2. Unified Orientation Layout: VideoPlayer & Sidebar stay mounted across orientation/theater switches */}
+      <main
+        ref={portraitMainRef}
+        className={
+          isPortraitMode
+            ? 'flex-1 flex flex-col min-h-0 overflow-hidden'
+            : 'flex-1 flex flex-row overflow-hidden p-2 md:p-3 gap-3 w-full min-h-0'
+        }
+      >
+        {/* Video Player Stage (always first child so VideoPlayer never unmounts) */}
+        <section
+          className={
+            isPortraitMode
+              ? `w-full bg-black overflow-hidden transition-[height] duration-150 ${
+                  isTypingInPortraitChat
+                    ? 'flex-1 min-h-0'
+                    : isPortraitVideoCollapsed
+                    ? 'shrink-0 h-0'
+                    : 'shrink-0'
+                }`
+              : 'flex-1 min-w-0 h-full flex items-center justify-center overflow-hidden'
+          }
+          style={
+            isPortraitMode
+              ? isTypingInPortraitChat
                 ? undefined
                 : isPortraitVideoCollapsed
                 ? { height: '0px' }
                 : { height: `${portraitVideoPercent}%` }
-            }
-          >
-            <VideoPlayer
-              currentTrack={currentTrack}
-              playlist={roomState?.playlist || []}
-              currentTrackIndex={roomState?.currentTrackIndex || 0}
-              isHost={isHost}
-              clockOffsetMs={clockOffsetMs}
-              playbackState={
-                roomState?.playbackState || {
-                  isPlaying: false,
-                  currentTime: 0,
-                  lastUpdatedServerTime: Date.now(),
-                  isSystemPausedForBuffering: false,
-                }
+              : undefined
+          }
+        >
+          <VideoPlayer
+            currentTrack={currentTrack}
+            playlist={roomState?.playlist || []}
+            currentTrackIndex={roomState?.currentTrackIndex || 0}
+            isHost={isHost}
+            clockOffsetMs={clockOffsetMs}
+            playbackState={
+              roomState?.playbackState || {
+                isPlaying: false,
+                currentTime: 0,
+                lastUpdatedServerTime: Date.now(),
+                isSystemPausedForBuffering: false,
               }
-              bufferingUsers={bufferingUsers}
-              danmakuItems={danmakuItems}
-              floatingEmojis={floatingEmojis}
-              onPlay={handlePlay}
-              onPause={handlePause}
-              onSeek={handleSeek}
-              onForcePlay={handleForcePlay}
-              onBufferingStart={handleBufferingStart}
-              onBufferingEnd={handleBufferingEnd}
-              onTrackEnded={handleTrackEnded}
-              onProgressReport={handleProgressReport}
-              onTriggerUpload={() => setActiveTab('playlist')}
-            />
-          </div>
+            }
+            bufferingUsers={bufferingUsers}
+            danmakuItems={danmakuItems}
+            floatingEmojis={floatingEmojis}
+            isTheaterMode={isPortraitMode ? undefined : isTheaterMode}
+            onPlay={handlePlay}
+            onPause={handlePause}
+            onSeek={handleSeek}
+            onForcePlay={handleForcePlay}
+            onBufferingStart={handleBufferingStart}
+            onBufferingEnd={handleBufferingEnd}
+            onTrackEnded={handleTrackEnded}
+            onProgressReport={handleProgressReport}
+            onTriggerUpload={() => setActiveTab('playlist')}
+            onToggleTheater={isPortraitMode ? undefined : () => setIsTheaterMode((prev) => !prev)}
+          />
+        </section>
 
-          {/* Drag handle & quick resize controls for Chat block */}
-          {!isKeyboardOpen && (
-            <div
-              onPointerDown={(e) => {
-                // Only start drag if user didn't tap the toggle button
-                if ((e.target as HTMLElement).closest('button')) return;
-                isResizingChatRef.current = true;
-              }}
-              className="h-6 bg-neutral-900/95 border-y border-neutral-800/90 flex items-center justify-between px-2 shrink-0 touch-none cursor-row-resize select-none"
-              title="Потяните вверх или вниз, чтобы изменить размер чата"
-            >
-              <span className="text-[10px] text-neutral-500 font-medium">
-                {isPortraitVideoCollapsed ? 'Видео скрыто' : `Экран ${portraitVideoPercent}%`}
-              </span>
-
-              <div className="flex items-center gap-1 text-neutral-500">
-                <GripHorizontal className="w-4 h-4" />
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (isPortraitVideoCollapsed) {
-                    setIsPortraitVideoCollapsed(false);
-                    if (portraitVideoPercent < 18) setPortraitVideoPercent(30);
-                  } else if (portraitVideoPercent > 22) {
-                    setPortraitVideoPercent(18);
-                  } else {
-                    setIsPortraitVideoCollapsed(true);
-                  }
-                }}
-                className="px-2 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-[10px] font-medium text-neutral-300 flex items-center gap-1 cursor-pointer"
-              >
-                {isPortraitVideoCollapsed ? (
-                  <>
-                    <ChevronDown className="w-3 h-3 text-rose-400" />
-                    <span>Показать видео</span>
-                  </>
-                ) : portraitVideoPercent > 22 ? (
-                  <>
-                    <ChevronUp className="w-3 h-3 text-amber-400" />
-                    <span>Больше чата</span>
-                  </>
-                ) : (
-                  <>
-                    <ChevronUp className="w-3 h-3 text-rose-400" />
-                    <span>Скрыть видео</span>
-                  </>
-                )}
-              </button>
-            </div>
-          )}
-
-          {/* Under video: Tab Navigation (hidden while typing in chat so video gets maximum area) */}
-          {!isTypingInPortraitChat && (
-            <div className="p-1.5 bg-neutral-950 border-b border-neutral-800 shrink-0">
-              {TabNavButtons}
-            </div>
-          )}
-
-          {/* Chat / Tab takes remaining space normally, or shrinks to only the input bar while typing */}
+        {/* Portrait drag handle & quick resize controls */}
+        {isPortraitMode && !isKeyboardOpen && (
           <div
-            className={
-              isTypingInPortraitChat
+            onPointerDown={(e) => {
+              if ((e.target as HTMLElement).closest('button')) return;
+              isResizingChatRef.current = true;
+            }}
+            className="h-6 bg-neutral-900/95 border-y border-neutral-800/90 flex items-center justify-between px-2 shrink-0 touch-none cursor-row-resize select-none"
+            title="Потяните вверх или вниз, чтобы изменить размер чата"
+          >
+            <span className="text-[10px] text-neutral-500 font-medium">
+              {isPortraitVideoCollapsed ? 'Видео скрыто' : `Экран ${portraitVideoPercent}%`}
+            </span>
+
+            <div className="flex items-center gap-1 text-neutral-500">
+              <GripHorizontal className="w-4 h-4" />
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (isPortraitVideoCollapsed) {
+                  setIsPortraitVideoCollapsed(false);
+                  if (portraitVideoPercent < 18) setPortraitVideoPercent(30);
+                } else if (portraitVideoPercent > 22) {
+                  setPortraitVideoPercent(18);
+                } else {
+                  setIsPortraitVideoCollapsed(true);
+                }
+              }}
+              className="px-2 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-[10px] font-medium text-neutral-300 flex items-center gap-1 cursor-pointer"
+            >
+              {isPortraitVideoCollapsed ? (
+                <>
+                  <ChevronDown className="w-3 h-3 text-rose-400" />
+                  <span>Показать видео</span>
+                </>
+              ) : portraitVideoPercent > 22 ? (
+                <>
+                  <ChevronUp className="w-3 h-3 text-amber-400" />
+                  <span>Больше чата</span>
+                </>
+              ) : (
+                <>
+                  <ChevronUp className="w-3 h-3 text-rose-400" />
+                  <span>Скрыть видео</span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
+
+        {/* Portrait tab navigation */}
+        {isPortraitMode && !isTypingInPortraitChat && (
+          <div className="p-1.5 bg-neutral-950 border-b border-neutral-800 shrink-0">
+            {TabNavButtons}
+          </div>
+        )}
+
+        {/* Sidebar / Bottom Chat+Playlist+Participants Container (never unmounted) */}
+        <aside
+          className={
+            isPortraitMode
+              ? isTypingInPortraitChat
                 ? 'shrink-0 p-1.5 flex flex-col'
                 : 'flex-1 min-h-0 p-1.5 flex flex-col overflow-hidden'
-            }
-          >
-            {TabContent}
-          </div>
-        </main>
-      ) : (
-        /* DESKTOP / TABLET LANDSCAPE: Full-width responsive stage without artificial limits */
-        <main className="flex-1 flex flex-row overflow-hidden p-2 md:p-3 gap-3 w-full min-h-0">
-          {/* Left Column: Maximum 16:9 Cinema Stage */}
-          <section className="flex-1 min-w-0 h-full flex items-center justify-center overflow-hidden">
-            <VideoPlayer
-              currentTrack={currentTrack}
-              playlist={roomState?.playlist || []}
-              currentTrackIndex={roomState?.currentTrackIndex || 0}
-              isHost={isHost}
-              clockOffsetMs={clockOffsetMs}
-              playbackState={
-                roomState?.playbackState || {
-                  isPlaying: false,
-                  currentTime: 0,
-                  lastUpdatedServerTime: Date.now(),
-                  isSystemPausedForBuffering: false,
-                }
-              }
-              bufferingUsers={bufferingUsers}
-              danmakuItems={danmakuItems}
-              floatingEmojis={floatingEmojis}
-              isTheaterMode={isTheaterMode}
-              onPlay={handlePlay}
-              onPause={handlePause}
-              onSeek={handleSeek}
-              onForcePlay={handleForcePlay}
-              onBufferingStart={handleBufferingStart}
-              onBufferingEnd={handleBufferingEnd}
-              onTrackEnded={handleTrackEnded}
-              onProgressReport={handleProgressReport}
-              onTriggerUpload={() => setActiveTab('playlist')}
-              onToggleTheater={() => setIsTheaterMode((prev) => !prev)}
-            />
-          </section>
-
-          {/* Right Column: Chat, Playlist, Participants (collapsible in theater mode) */}
-          {!isTheaterMode && (
-            <aside className="w-[340px] md:w-[380px] lg:w-[400px] xl:w-[440px] flex flex-col shrink-0 h-full min-h-0 gap-2 transition-all duration-300">
-              {TabNavButtons}
-              {TabContent}
-            </aside>
-          )}
-        </main>
-      )}
+              : isTheaterMode
+              ? 'hidden'
+              : 'w-[340px] md:w-[380px] lg:w-[400px] xl:w-[440px] flex flex-col shrink-0 h-full min-h-0 gap-2 transition-all duration-300'
+          }
+        >
+          {!isPortraitMode && TabNavButtons}
+          {TabContent}
+        </aside>
+      </main>
     </div>
   );
 }

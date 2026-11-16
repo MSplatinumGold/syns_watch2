@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   UploadCloud,
   Play,
@@ -76,9 +76,22 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   const chunkLoadedMapRef = useRef<Map<number, number>>(new Map());
   const completedChunksSetRef = useRef<Set<number>>(new Set());
   const isCancelledRef = useRef(false);
+  const fileQueueRef = useRef<File[]>([]);
+  const completionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startUploadForFileRef = useRef<(file: File) => void>(() => {});
 
   const [upload, setUpload] = useState<ResumableUploadState | null>(null);
+  const [queuedCount, setQueuedCount] = useState(0);
   const [codecWarning, setCodecWarning] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (completionTimerRef.current) {
+        clearTimeout(completionTimerRef.current);
+        completionTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const speedTrackerRef = useRef<{ lastTime: number; lastTotalBytes: number }>({
     lastTime: Date.now(),
@@ -212,11 +225,20 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                       }
                     : null
                 );
-                setTimeout(() => {
-                  setUpload(null);
+                if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
+                const delayMs = fileQueueRef.current.length > 0 ? 800 : 2000;
+                completionTimerRef.current = setTimeout(() => {
+                  completionTimerRef.current = null;
                   onClearUploadProgress?.(fileId);
-                  if (fileInputRef.current) fileInputRef.current.value = '';
-                }, 2000);
+                  if (!isCancelledRef.current && fileQueueRef.current.length > 0) {
+                    const nextFile = fileQueueRef.current.shift()!;
+                    setQueuedCount(fileQueueRef.current.length);
+                    startUploadForFileRef.current(nextFile);
+                  } else {
+                    setUpload(null);
+                    if (fileInputRef.current) fileInputRef.current.value = '';
+                  }
+                }, delayMs);
               }
               resolve();
             } catch (e) {
@@ -333,44 +355,66 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     [uploadChunkWithProgress, emitRoomUploadProgress]
   );
 
-  // File Picker Handler (Concurrent Chunked Upload initialization)
+  const startUploadForFile = useCallback(
+    (file: File) => {
+      const fileId = Math.random().toString(36).substring(2, 10) + '_' + Date.now();
+      const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+
+      isCancelledRef.current = false;
+      completedChunksSetRef.current.clear();
+      chunkLoadedMapRef.current.clear();
+      speedTrackerRef.current = { lastTime: Date.now(), lastTotalBytes: 0 };
+
+      setUpload({
+        file,
+        fileId,
+        status: 'uploading',
+        uploadedBytes: 0,
+        totalBytes: file.size,
+        currentChunkIndex: 0,
+        totalChunks,
+        speed: 0,
+        remainingSeconds: 0,
+        retryAttempt: 0,
+      });
+      emitRoomUploadProgress(fileId, file.name, 0, 'uploading', true);
+
+      const allChunks = Array.from({ length: totalChunks }, (_, i) => i);
+      uploadChunkLoop(file, fileId, allChunks);
+    },
+    [emitRoomUploadProgress, uploadChunkLoop]
+  );
+
+  startUploadForFileRef.current = startUploadForFile;
+
+  // File Picker Handler (Concurrent Chunked Upload with Sequential Multi-File Queue)
   const handleFiles = (files: FileList | null) => {
     if (!files || files.length === 0 || !isHost) return;
 
-    const file = files[0];
-    const ext = file.name.split('.').pop()?.toLowerCase();
-    if (ext === 'mkv' || ext === 'avi' || ext === 'wmv') {
+    const selectedFiles = Array.from(files);
+    const hasUnsafeCodec = selectedFiles.some((f) => {
+      const ext = f.name.split('.').pop()?.toLowerCase();
+      return ext === 'mkv' || ext === 'avi' || ext === 'wmv';
+    });
+    if (hasUnsafeCodec) {
       setCodecWarning(
-        'Внимание: Браузеры могут не поддерживать кодеки .mkv или .avi. Рекомендуется MP4 (H.264/AAC).'
+        'Внимание: Браузеры могут не поддерживать кодеки .mkv, .avi или .wmv. Рекомендуется MP4 (H.264/AAC).'
       );
-    } else {
+    } else if (!upload) {
       setCodecWarning(null);
     }
 
-    const fileId = Math.random().toString(36).substring(2, 10) + '_' + Date.now();
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    if (upload === null) {
+      const [first, ...rest] = selectedFiles;
+      fileQueueRef.current = rest;
+      setQueuedCount(rest.length);
+      startUploadForFile(first);
+    } else {
+      fileQueueRef.current.push(...selectedFiles);
+      setQueuedCount(fileQueueRef.current.length);
+    }
 
-    isCancelledRef.current = false;
-    completedChunksSetRef.current.clear();
-    chunkLoadedMapRef.current.clear();
-    speedTrackerRef.current = { lastTime: Date.now(), lastTotalBytes: 0 };
-
-    setUpload({
-      file,
-      fileId,
-      status: 'uploading',
-      uploadedBytes: 0,
-      totalBytes: file.size,
-      currentChunkIndex: 0,
-      totalChunks,
-      speed: 0,
-      remainingSeconds: 0,
-      retryAttempt: 0,
-    });
-    emitRoomUploadProgress(fileId, file.name, 0, 'uploading', true);
-
-    const allChunks = Array.from({ length: totalChunks }, (_, i) => i);
-    uploadChunkLoop(file, fileId, allChunks);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   // Retry failed upload
@@ -405,6 +449,12 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   // Cancel in-flight upload and purge .part file from server disk
   const handleCancelUpload = async () => {
     isCancelledRef.current = true;
+    if (completionTimerRef.current) {
+      clearTimeout(completionTimerRef.current);
+      completionTimerRef.current = null;
+    }
+    fileQueueRef.current = [];
+    setQueuedCount(0);
     activeXhrsRef.current.forEach((xhr) => xhr.abort());
     activeXhrsRef.current.clear();
     completedChunksSetRef.current.clear();
@@ -465,11 +515,11 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         {isHost && (
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={upload !== null && (upload.status === 'uploading' || upload.status === 'retrying')}
-            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow disabled:opacity-50 cursor-pointer"
+            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow cursor-pointer"
+            title={upload ? 'Добавить еще файлы в очередь загрузки' : 'Загрузить один или несколько видеофайлов'}
           >
             <UploadCloud className="w-3.5 h-3.5" />
-            <span>Загрузить</span>
+            <span>{upload ? 'Добавить' : 'Загрузить'}</span>
           </button>
         )}
       </div>
@@ -509,6 +559,11 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
               <span className="text-xs font-semibold text-neutral-200 truncate" title={upload.file.name}>
                 {upload.file.name}
               </span>
+              {queuedCount > 0 && (
+                <span className="text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-300 border border-neutral-700 shrink-0">
+                  +{queuedCount} в очереди
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-1.5 shrink-0">

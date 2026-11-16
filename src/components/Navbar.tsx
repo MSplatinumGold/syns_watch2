@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Film, Copy, Check, Users, Crown, LogOut, Radio, Settings, X, Trash2 } from 'lucide-react';
+import { copyToClipboard } from '../utils/format.ts';
 
 interface NavbarProps {
   roomId: string;
@@ -47,11 +48,13 @@ export const Navbar: React.FC<NavbarProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showSettings]);
 
-  const handleCopyLink = () => {
+  const handleCopyLink = async () => {
     const inviteUrl = `${window.location.origin}?room=${roomId}`;
-    navigator.clipboard.writeText(inviteUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    const ok = await copyToClipboard(inviteUrl);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleSaveNickname = (e: React.FormEvent) => {

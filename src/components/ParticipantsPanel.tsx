@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Users, Crown, Check, Share2, Clock, Tag, X } from 'lucide-react';
 import type { User } from '../types/watchparty.ts';
-import { formatTime } from '../utils/format.ts';
+import { formatTime, copyToClipboard } from '../utils/format.ts';
 
 const PRESET_PREFIXES = ['🍿 Киноман', '🐱 Котик', '👑 Легенда', '🔥 Босс', '😴 Сонный'];
 
@@ -31,11 +31,13 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
   const [prefixInput, setPrefixInput] = useState('');
   const userList = Object.values(users);
 
-  const handleCopyLink = () => {
+  const handleCopyLink = async () => {
     const inviteUrl = `${window.location.origin}?room=${roomId}`;
-    navigator.clipboard.writeText(inviteUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2500);
+    const ok = await copyToClipboard(inviteUrl);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    }
   };
 
   const openPrefixEditor = (user: User) => {
