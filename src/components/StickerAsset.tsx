@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import lottie, { AnimationItem } from 'lottie-web';
-import { gunzipSync } from 'fflate';
+import type { AnimationItem } from 'lottie-web';
 
 interface StickerAssetProps {
   src: string;
@@ -10,16 +9,26 @@ interface StickerAssetProps {
 
 const tgsDataCache = new Map<string, Promise<object>>();
 
+async function loadTgsDeps() {
+  const [{ default: lottie }, { gunzipSync }] = await Promise.all([
+    import('lottie-web/build/player/lottie_light'),
+    import('fflate'),
+  ]);
+  return { lottie, gunzipSync };
+}
+
 function loadTgsAnimationData(url: string): Promise<object> {
   const existing = tgsDataCache.get(url);
   if (existing) return existing;
 
-  const promise = fetch(url)
-    .then((res) => {
+  const promise = Promise.all([
+    fetch(url).then((res) => {
       if (!res.ok) throw new Error(`Failed to load sticker: ${res.status}`);
       return res.arrayBuffer();
-    })
-    .then((buf) => {
+    }),
+    loadTgsDeps(),
+  ])
+    .then(([buf, { gunzipSync }]) => {
       const decompressed = gunzipSync(new Uint8Array(buf));
       const jsonStr = new TextDecoder('utf-8').decode(decompressed);
       return JSON.parse(jsonStr) as object;
@@ -45,8 +54,8 @@ export const StickerAsset: React.FC<StickerAssetProps> = ({ src, alt, className 
     let anim: AnimationItem | null = null;
     setLoaded(false);
 
-    loadTgsAnimationData(src)
-      .then((animationData) => {
+    Promise.all([loadTgsAnimationData(src), loadTgsDeps()])
+      .then(([animationData, { lottie }]) => {
         if (cancelled || !containerRef.current) return;
         containerRef.current.innerHTML = '';
         anim = lottie.loadAnimation({
