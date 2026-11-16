@@ -412,6 +412,7 @@ app.post('/api/rooms/create', (req, res) => {
       isSystemPausedForBuffering: false,
     },
     emptyTimeoutId: null,
+    activeUpload: null,
     chatMediaFiles: [],
     chatMediaTotalBytes: 0,
   };
@@ -722,8 +723,10 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
         };
 
         room.playlist.push(item);
+        room.activeUpload = null;
 
-        // Broadcast playlist update
+        // Clear upload badge & broadcast playlist update
+        io.to(roomId).emit('upload:progress', null);
         io.to(roomId).emit('playlist:updated', {
           playlist: room.playlist,
           currentTrackIndex: room.currentTrackIndex,
@@ -793,6 +796,10 @@ app.post('/api/rooms/:roomId/upload/cancel/:fileId', async (req, res) => {
   }
 
   uploadSessions.delete(fileId);
+  if (room.activeUpload?.fileId === fileId) {
+    room.activeUpload = null;
+    io.to(roomId).emit('upload:progress', null);
+  }
 
   const roomDir = getRoomStorageDir(roomId);
   const partPath = path.join(roomDir, `${fileId}.part`);
@@ -1137,6 +1144,7 @@ io.on('connection', (socket) => {
           isSystemPausedForBuffering: false,
         },
         emptyTimeoutId: null,
+        activeUpload: null,
         chatMediaFiles: [],
         chatMediaTotalBytes: 0,
       };
@@ -1587,6 +1595,26 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Edit own chat message
+  socket.on('chat:edit', ({ messageId, text }) => {
+    if (!currentRoomId || !messageId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    const roomMsgs = chatMessageRegistry.get(currentRoomId);
+    const entry = roomMsgs?.get(messageId);
+    if (!entry || entry.userId !== socket.id) return;
+
+    const cleanText = (typeof text === 'string' ? text : '').trim().slice(0, 500);
+    if (!cleanText && !entry.mediaId) return;
+
+    io.to(currentRoomId).emit('chat:edited', {
+      messageId,
+      text: cleanText,
+      editedAt: Date.now(),
+    });
+  });
+
   // Delete own chat message
   socket.on('chat:delete', ({ messageId }) => {
     if (!currentRoomId || !messageId) return;
@@ -1609,6 +1637,45 @@ io.on('connection', (socket) => {
     }
 
     io.to(currentRoomId).emit('chat:deleted', { messageId });
+  });
+
+  // Host upload progress broadcast (throttled on client)
+  socket.on('upload:progress', ({ fileId, fileName, percent, status }) => {
+    if (!currentRoomId || !fileId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.hostId !== socket.id) return;
+
+    const user = room.users[socket.id];
+    const validStatus =
+      status === 'uploading' || status === 'retrying' || status === 'error' || status === 'completed'
+        ? status
+        : 'uploading';
+    const clampedPercent = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+    const safeName = (typeof fileName === 'string' ? fileName : 'video')
+      .replace(/[\r\n]+/g, ' ')
+      .trim()
+      .slice(0, 80);
+
+    room.activeUpload = {
+      fileId: String(fileId).slice(0, 64),
+      fileName: safeName || 'Видео',
+      percent: clampedPercent,
+      status: validStatus,
+      uploaderName: user?.nickname,
+    };
+
+    io.to(currentRoomId).emit('upload:progress', room.activeUpload);
+  });
+
+  socket.on('upload:clear', ({ fileId }) => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.hostId !== socket.id) return;
+
+    if (!fileId || room.activeUpload?.fileId === fileId) {
+      room.activeUpload = null;
+      io.to(currentRoomId).emit('upload:progress', null);
+    }
   });
 
   // Typing indicator broadcast (excludes sender)
@@ -1673,6 +1740,10 @@ io.on('connection', (socket) => {
         const newHost = remainingUsers[0];
         newHost.isHost = true;
         room.hostId = newHost.id;
+        if (room.activeUpload) {
+          room.activeUpload = null;
+          io.to(currentRoomId).emit('upload:progress', null);
+        }
 
         io.to(currentRoomId).emit('room:host_changed', { hostId: newHost.id });
         io.to(currentRoomId).emit('chat:message', {

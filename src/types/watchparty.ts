@@ -25,6 +25,14 @@ export interface RoomPlaybackState {
   isSystemPausedForBuffering: boolean;
 }
 
+export interface RoomUploadProgress {
+  fileId: string;
+  fileName: string;
+  percent: number;
+  status: 'uploading' | 'retrying' | 'error' | 'completed';
+  uploaderName?: string;
+}
+
 export interface RoomState {
   roomId: string;
   hostId: string;
@@ -32,6 +40,7 @@ export interface RoomState {
   playlist: PlaylistItem[];
   currentTrackIndex: number;
   playbackState: RoomPlaybackState;
+  activeUpload?: RoomUploadProgress | null;
   emptyTimeoutId?: NodeJS.Timeout | null;
 }
 
@@ -62,6 +71,7 @@ export interface ChatMessage {
   prefix?: string;
   text: string;
   timestamp: number;
+  editedAt?: number;
   type: 'message' | 'system' | 'action';
   media?: ChatMediaAttachment;
   replyTo?: ChatReplyRef;
@@ -96,9 +106,17 @@ export interface ClientToServerEvents {
   'client:progress': (payload: { currentTime: number }) => void;
   'host:close_room': () => void;
   'chat:send': (payload: { text: string; replyTo?: ChatReplyRef }) => void;
+  'chat:edit': (payload: { messageId: string; text: string }) => void;
   'chat:delete': (payload: { messageId: string }) => void;
   'chat:typing': (payload: { isTyping: boolean }) => void;
   'chat:floating_emoji': (payload: { emoji: string }) => void;
+  'upload:progress': (payload: {
+    fileId: string;
+    fileName: string;
+    percent: number;
+    status: 'uploading' | 'retrying' | 'error' | 'completed';
+  }) => void;
+  'upload:clear': (payload: { fileId: string }) => void;
 }
 
 export interface ServerToClientEvents {
@@ -117,10 +135,12 @@ export interface ServerToClientEvents {
   'playlist:updated': (payload: { playlist: PlaylistItem[]; currentTrackIndex: number }) => void;
   'users:progress': (payload: { userId: string; currentTime: number }) => void;
   'chat:message': (message: ChatMessage) => void;
+  'chat:edited': (payload: { messageId: string; text: string; editedAt: number }) => void;
   'chat:deleted': (payload: { messageId: string }) => void;
   'chat:typing': (payload: { userId: string; nickname: string; isTyping: boolean }) => void;
   'chat:floating_emoji': (item: FloatingEmojiItem) => void;
   'chat:media_pruned': (payload: { deletedMediaIds: string[] }) => void;
+  'upload:progress': (progress: RoomUploadProgress | null) => void;
   'room:closed': (payload: { reason: string }) => void;
   'error:notification': (payload: { message: string }) => void;
 }

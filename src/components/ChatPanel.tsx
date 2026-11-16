@@ -14,8 +14,12 @@ import {
   Trash2,
   Reply,
   Clock,
+  Pencil,
+  Check,
+  UploadCloud,
+  CheckCircle2,
 } from 'lucide-react';
-import type { ChatMessage, ChatReplyRef, User } from '../types/watchparty.ts';
+import type { ChatMessage, ChatReplyRef, RoomUploadProgress, User } from '../types/watchparty.ts';
 import { formatBytes, parseTime } from '../utils/format.ts';
 
 const MAX_CHAT_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB limit per file
@@ -36,7 +40,9 @@ interface ChatPanelProps {
   isHost?: boolean;
   isKeyboardOpen?: boolean;
   typingNicknames?: string[];
+  roomUploadProgress?: RoomUploadProgress | null;
   onSendMessage: (text: string, replyTo?: ChatReplyRef) => void;
+  onEditMessage: (messageId: string, text: string) => void;
   onDeleteMessage: (messageId: string) => void;
   onTypingChange?: (isTyping: boolean) => void;
   onSendFloatingEmoji?: (emoji: string) => void;
@@ -60,7 +66,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   isHost = false,
   isKeyboardOpen = false,
   typingNicknames = [],
+  roomUploadProgress = null,
   onSendMessage,
+  onEditMessage,
   onDeleteMessage,
   onTypingChange,
   onSendFloatingEmoji,
@@ -74,6 +82,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
+  const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [activeMenuMessageId, setActiveMenuMessageId] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
 
@@ -192,11 +201,35 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   });
 
   const startReply = (msg: ChatMessage) => {
+    setEditingMessage(null);
     setReplyingTo(msg);
     setActiveMenuMessageId(null);
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
     });
+  };
+
+  const startEdit = (msg: ChatMessage) => {
+    setReplyingTo(null);
+    setPendingFile(null);
+    setMediaError(null);
+    if (mediaInputRef.current) mediaInputRef.current.value = '';
+    setEditingMessage(msg);
+    setText(msg.text);
+    setActiveMenuMessageId(null);
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        textareaRef.current.style.height = 'auto';
+        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 84)}px`;
+      }
+    });
+  };
+
+  const cancelEdit = () => {
+    setEditingMessage(null);
+    setText('');
+    resetTextareaHeight();
   };
 
   const scrollToMessage = (messageId: string) => {
@@ -214,6 +247,22 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     if (isUploadingMedia) return;
 
     const clean = text.trim();
+
+    if (editingMessage) {
+      const hasActiveMedia = Boolean(editingMessage.media && !editingMessage.media.expired);
+      if (!clean && !hasActiveMedia) return;
+      if (clean !== editingMessage.text.trim()) {
+        onEditMessage(editingMessage.id, clean);
+      }
+      setEditingMessage(null);
+      setText('');
+      resetTextareaHeight();
+      setShowEmojiPicker(false);
+      lastTypingEmitAtRef.current = 0;
+      onTypingChange?.(false);
+      return;
+    }
+
     const replyRef = replyingTo ? toReplyRef(replyingTo) : undefined;
 
     if (pendingFile) {
@@ -358,6 +407,51 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         </div>
       )}
 
+      {/* Room-wide compact video upload progress badge */}
+      {roomUploadProgress && !isKeyboardOpen && (
+        <div className="px-3 py-1.5 bg-neutral-950/90 border-b border-neutral-800/80 flex items-center gap-2 shrink-0">
+          {roomUploadProgress.status === 'completed' ? (
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          ) : roomUploadProgress.status === 'error' ? (
+            <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+          ) : (
+            <UploadCloud className="w-3.5 h-3.5 text-amber-400 animate-pulse shrink-0" />
+          )}
+          <div className="flex-1 min-w-0 flex items-center gap-2">
+            <span className="text-[11px] text-neutral-300 truncate" title={roomUploadProgress.fileName}>
+              {roomUploadProgress.status === 'completed'
+                ? `Загружено: ${roomUploadProgress.fileName}`
+                : roomUploadProgress.status === 'error'
+                ? `Ошибка загрузки: ${roomUploadProgress.fileName}`
+                : `Загрузка видео: ${roomUploadProgress.fileName}`}
+            </span>
+            <div className="w-14 sm:w-20 h-1.5 bg-neutral-800 rounded-full overflow-hidden shrink-0">
+              <div
+                className={`h-full rounded-full transition-all duration-300 ${
+                  roomUploadProgress.status === 'error'
+                    ? 'bg-rose-500'
+                    : roomUploadProgress.status === 'completed'
+                    ? 'bg-emerald-500'
+                    : 'bg-gradient-to-r from-rose-500 to-amber-400'
+                }`}
+                style={{ width: `${roomUploadProgress.percent}%` }}
+              />
+            </div>
+          </div>
+          <span
+            className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded shrink-0 ${
+              roomUploadProgress.status === 'error'
+                ? 'bg-rose-500/15 text-rose-300'
+                : roomUploadProgress.status === 'completed'
+                ? 'bg-emerald-500/15 text-emerald-300'
+                : 'bg-amber-500/15 text-amber-300'
+            }`}
+          >
+            {roomUploadProgress.percent}%
+          </span>
+        </div>
+      )}
+
       {/* Messages Feed (collapsed when mobile keyboard is open so video stays visible) */}
       <div
         ref={containerRef}
@@ -437,6 +531,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   <span className="text-[10px] text-neutral-500 font-mono">
                     {formatMessageTime(msg.timestamp)}
                   </span>
+                  {msg.editedAt && (
+                    <span className="text-[10px] text-neutral-500 italic">(изм.)</span>
+                  )}
                 </div>
 
                 <div
@@ -525,7 +622,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   {msg.text && <p>{renderMessageTextWithTimecodes(msg.text, isMe)}</p>}
                 </div>
 
-                {/* Own message click context menu (Reply + Delete) */}
+                {/* Own message click context menu (Reply + Edit + Delete) */}
                 {isMe && activeMenuMessageId === msg.id && (
                   <div
                     onClick={(e) => e.stopPropagation()}
@@ -542,10 +639,20 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                     <div className="w-px h-4 bg-neutral-800" />
                     <button
                       type="button"
+                      onClick={() => startEdit(msg)}
+                      className="px-2.5 py-1 rounded-lg hover:bg-neutral-800 text-[11px] font-medium text-neutral-200 flex items-center gap-1.5 cursor-pointer transition"
+                    >
+                      <Pencil className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Изменить</span>
+                    </button>
+                    <div className="w-px h-4 bg-neutral-800" />
+                    <button
+                      type="button"
                       onClick={() => {
                         onDeleteMessage(msg.id);
                         setActiveMenuMessageId(null);
                         if (replyingTo?.id === msg.id) setReplyingTo(null);
+                        if (editingMessage?.id === msg.id) cancelEdit();
                       }}
                       className="px-2.5 py-1 rounded-lg hover:bg-rose-950/70 text-[11px] font-medium text-rose-400 flex items-center gap-1.5 cursor-pointer transition"
                     >
@@ -607,6 +714,34 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             : 'p-2 sm:p-3 pb-[max(0.5rem,calc(0.35rem+env(safe-area-inset-bottom)))] bg-neutral-950 border-t border-neutral-800 relative shrink-0 z-20 space-y-1.5'
         }`}
       >
+        {/* Editing banner */}
+        {editingMessage && (
+          <div className="rounded-xl bg-neutral-900 border border-neutral-700/80 border-l-2 border-l-amber-400 px-2.5 py-1.5 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Pencil className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-amber-400 truncate">
+                  Редактирование сообщения
+                </div>
+                <div className="text-[11px] text-neutral-400 truncate">
+                  {editingMessage.text ||
+                    (editingMessage.media
+                      ? `[${formatMediaLabel(editingMessage.media.mediaKind)}]`
+                      : 'Сообщение')}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={cancelEdit}
+              className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer shrink-0"
+              title="Отменить редактирование"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Reply target preview + 4 cute quick RP buttons */}
         {replyingTo && (
           <div className="rounded-xl bg-neutral-900 border border-neutral-700/80 border-l-2 border-l-rose-500 overflow-hidden">
@@ -738,7 +873,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         <div className="flex items-end gap-1.5 sm:gap-2">
           <button
             type="button"
-            disabled={isUploadingMedia}
+            disabled={isUploadingMedia || Boolean(editingMessage)}
             onClick={() => mediaInputRef.current?.click()}
             className={`p-2 rounded-xl border transition cursor-pointer shrink-0 disabled:opacity-40 ${
               pendingFile
@@ -772,7 +907,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             enterKeyHint="send"
             data-form-type="other"
             data-lpignore="true"
-            placeholder={pendingFile ? 'Подпись (необязательно)...' : 'Написать в чат...'}
+            placeholder={
+              editingMessage
+                ? 'Изменить текст сообщения...'
+                : pendingFile
+                ? 'Подпись (необязательно)...'
+                : 'Написать в чат...'
+            }
             value={text}
             onChange={(e) => {
               const nextVal = e.target.value;
@@ -780,7 +921,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               e.target.style.height = 'auto';
               e.target.style.height = `${Math.min(e.target.scrollHeight, 84)}px`;
 
-              if (onTypingChange) {
+              if (onTypingChange && !editingMessage) {
                 const now = Date.now();
                 if (nextVal.trim().length > 0) {
                   if (now - lastTypingEmitAtRef.current > 2000) {
@@ -794,6 +935,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               }
             }}
             onKeyDown={(e) => {
+              if (e.key === 'Escape' && editingMessage) {
+                e.preventDefault();
+                cancelEdit();
+                return;
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 submitMessage();
@@ -806,18 +952,33 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                 if (el) el.scrollTop = el.scrollHeight;
               }, 150);
             }}
-            className="flex-1 min-w-0 bg-neutral-900 border border-neutral-700 focus:border-rose-500 text-neutral-200 placeholder-neutral-500 text-base sm:text-xs md:text-sm rounded-xl px-3 py-1.5 sm:py-2 outline-none transition resize-none overflow-y-auto max-h-[84px] leading-snug"
+            className={`flex-1 min-w-0 bg-neutral-900 border ${
+              editingMessage
+                ? 'border-amber-500/70 focus:border-amber-400'
+                : 'border-neutral-700 focus:border-rose-500'
+            } text-neutral-200 placeholder-neutral-500 text-base sm:text-xs md:text-sm rounded-xl px-3 py-1.5 sm:py-2 outline-none transition resize-none overflow-y-auto max-h-[84px] leading-snug`}
           />
 
           <button
             type="button"
             onClick={() => submitMessage()}
-            disabled={(!text.trim() && !pendingFile) || isUploadingMedia}
-            className="p-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:hover:bg-rose-600 text-white transition shadow cursor-pointer shrink-0"
-            title="Отправить (Enter)"
+            disabled={
+              isUploadingMedia ||
+              (editingMessage
+                ? !text.trim() && !(editingMessage.media && !editingMessage.media.expired)
+                : !text.trim() && !pendingFile)
+            }
+            className={`p-2 rounded-xl text-white transition shadow cursor-pointer shrink-0 disabled:opacity-40 ${
+              editingMessage
+                ? 'bg-amber-600 hover:bg-amber-500 disabled:hover:bg-amber-600'
+                : 'bg-rose-600 hover:bg-rose-500 disabled:hover:bg-rose-600'
+            }`}
+            title={editingMessage ? 'Сохранить изменения (Enter)' : 'Отправить (Enter)'}
           >
             {isUploadingMedia ? (
               <Loader2 className="w-4 h-4 animate-spin" />
+            ) : editingMessage ? (
+              <Check className="w-4 h-4" />
             ) : (
               <Send className="w-4 h-4" />
             )}

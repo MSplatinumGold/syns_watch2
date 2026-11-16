@@ -13,6 +13,7 @@ import type {
   ChatReplyRef,
   DanmakuItem,
   FloatingEmojiItem,
+  RoomUploadProgress,
   ClientToServerEvents,
   ServerToClientEvents,
 } from './types/watchparty.ts';
@@ -42,6 +43,7 @@ export default function App() {
   const [floatingEmojis, setFloatingEmojis] = useState<FloatingEmojiItem[]>([]);
   const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
   const [bufferingUsers, setBufferingUsers] = useState<string[]>([]);
+  const [roomUploadProgress, setRoomUploadProgress] = useState<RoomUploadProgress | null>(null);
 
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
   const nicknameRef = useRef<string>('');
@@ -255,6 +257,7 @@ export default function App() {
     // Room initial state
     socket.on('room:init_state', (state: RoomState) => {
       setRoomState(state);
+      setRoomUploadProgress(state.activeUpload || null);
       if (state.playbackState.isSystemPausedForBuffering) {
         const waiting = Object.values(state.users)
           .filter((u) => u.isBuffering)
@@ -499,10 +502,36 @@ export default function App() {
       });
     });
 
+    // Chat message edited by author
+    socket.on('chat:edited', ({ messageId, text, editedAt }) => {
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id === messageId) {
+            return { ...m, text, editedAt };
+          }
+          if (m.replyTo && m.replyTo.id === messageId) {
+            return {
+              ...m,
+              replyTo: { ...m.replyTo, text: text.slice(0, 120) },
+            };
+          }
+          return m;
+        })
+      );
+      setDanmakuItems((prev) =>
+        prev.map((item) => (item.id === messageId ? { ...item, text, editedAt } : item))
+      );
+    });
+
     // Chat message deleted by author
     socket.on('chat:deleted', ({ messageId }) => {
       setMessages((prev) => prev.filter((m) => m.id !== messageId));
       setDanmakuItems((prev) => prev.filter((item) => item.id !== messageId));
+    });
+
+    // Room-wide video upload progress badge
+    socket.on('upload:progress', (progress) => {
+      setRoomUploadProgress(progress);
     });
 
     // Typing indicator
@@ -606,6 +635,7 @@ export default function App() {
     setRoomState(null);
     setMessages([]);
     setDanmakuItems([]);
+    setRoomUploadProgress(null);
     window.history.pushState({}, '', window.location.pathname);
   };
 
@@ -688,6 +718,10 @@ export default function App() {
     socketRef.current?.emit('chat:send', { text, replyTo });
   }, []);
 
+  const handleEditMessage = useCallback((messageId: string, text: string) => {
+    socketRef.current?.emit('chat:edit', { messageId, text });
+  }, []);
+
   const handleDeleteMessage = useCallback((messageId: string) => {
     socketRef.current?.emit('chat:delete', { messageId });
   }, []);
@@ -698,6 +732,22 @@ export default function App() {
 
   const handleSendFloatingEmoji = useCallback((emoji: string) => {
     socketRef.current?.emit('chat:floating_emoji', { emoji });
+  }, []);
+
+  const handleEmitUploadProgress = useCallback(
+    (payload: {
+      fileId: string;
+      fileName: string;
+      percent: number;
+      status: 'uploading' | 'retrying' | 'error' | 'completed';
+    }) => {
+      socketRef.current?.emit('upload:progress', payload);
+    },
+    []
+  );
+
+  const handleClearUploadProgress = useCallback((fileId: string) => {
+    socketRef.current?.emit('upload:clear', { fileId });
   }, []);
 
   const handleProgressReport = useCallback(
@@ -809,10 +859,10 @@ export default function App() {
 
   const isTypingInPortraitChat = isPortraitMode && isKeyboardOpen && activeTab === 'chat';
 
-  // Tab panel content component
+  // Tab panel content component (keep panels mounted so ongoing video uploads & drafts persist across tab switches)
   const TabContent = (
     <div className={isTypingInPortraitChat ? 'shrink-0' : 'flex-1 min-h-0 overflow-hidden'}>
-      {activeTab === 'chat' && (
+      <div className={activeTab === 'chat' ? (isKeyboardOpen ? 'shrink-0' : 'h-full') : 'hidden'}>
         <ChatPanel
           messages={messages}
           users={roomState?.users || {}}
@@ -822,15 +872,17 @@ export default function App() {
           isHost={isHost}
           isKeyboardOpen={isKeyboardOpen}
           typingNicknames={Object.values(typingUsers)}
+          roomUploadProgress={roomUploadProgress}
           onSendMessage={handleSendMessage}
+          onEditMessage={handleEditMessage}
           onDeleteMessage={handleDeleteMessage}
           onTypingChange={handleTypingChange}
           onSendFloatingEmoji={handleSendFloatingEmoji}
           onSeekToTimecode={handleSeek}
         />
-      )}
+      </div>
 
-      {activeTab === 'playlist' && (
+      <div className={activeTab === 'playlist' ? 'h-full' : 'hidden'}>
         <PlaylistPanel
           playlist={roomState?.playlist || []}
           currentTrackIndex={roomState?.currentTrackIndex || 0}
@@ -841,10 +893,12 @@ export default function App() {
           onChangeTrack={handleChangeTrack}
           onReorder={handleReorderPlaylist}
           onDeleteTrack={handleDeleteTrack}
+          onBroadcastUploadProgress={handleEmitUploadProgress}
+          onClearUploadProgress={handleClearUploadProgress}
         />
-      )}
+      </div>
 
-      {activeTab === 'participants' && (
+      <div className={activeTab === 'participants' ? 'h-full' : 'hidden'}>
         <ParticipantsPanel
           users={roomState?.users || {}}
           hostId={roomState?.hostId || ''}
@@ -855,7 +909,7 @@ export default function App() {
           onTransferHost={handleTransferHost}
           onSetUserPrefix={handleSetUserPrefix}
         />
-      )}
+      </div>
     </div>
   );
 

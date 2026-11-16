@@ -49,6 +49,13 @@ interface PlaylistPanelProps {
   onChangeTrack: (index: number) => void;
   onReorder: (newOrderIds: string[]) => void;
   onDeleteTrack: (fileId: string) => void;
+  onBroadcastUploadProgress?: (payload: {
+    fileId: string;
+    fileName: string;
+    percent: number;
+    status: 'uploading' | 'retrying' | 'error' | 'completed';
+  }) => void;
+  onClearUploadProgress?: (fileId: string) => void;
 }
 
 export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
@@ -61,6 +68,8 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   onChangeTrack,
   onReorder,
   onDeleteTrack,
+  onBroadcastUploadProgress,
+  onClearUploadProgress,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activeXhrsRef = useRef<Set<XMLHttpRequest>>(new Set());
@@ -75,6 +84,38 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     lastTime: Date.now(),
     lastTotalBytes: 0,
   });
+  const lastBroadcastRef = useRef<{ time: number; percent: number; status: string }>({
+    time: 0,
+    percent: -1,
+    status: '',
+  });
+
+  const emitRoomUploadProgress = useCallback(
+    (
+      fileId: string,
+      fileName: string,
+      percent: number,
+      status: 'uploading' | 'retrying' | 'error' | 'completed',
+      force = false
+    ) => {
+      if (!onBroadcastUploadProgress) return;
+      const now = Date.now();
+      const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+      const prev = lastBroadcastRef.current;
+
+      if (
+        !force &&
+        status === prev.status &&
+        (now - prev.time < 800 || clamped === prev.percent)
+      ) {
+        return;
+      }
+
+      lastBroadcastRef.current = { time: now, percent: clamped, status };
+      onBroadcastUploadProgress({ fileId, fileName, percent: clamped, status });
+    },
+    [onBroadcastUploadProgress]
+  );
 
   // Upload a single 5MB chunk with real-time byte progress
   const uploadChunkWithProgress = useCallback(
@@ -113,6 +154,9 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
             inFlightBytes += bytes;
           });
           const totalUploadedSoFar = Math.min(completedBytes + inFlightBytes, file.size);
+
+          const percent = file.size > 0 ? Math.min(99, Math.round((totalUploadedSoFar / file.size) * 100)) : 0;
+          emitRoomUploadProgress(fileId, file.name, percent, 'uploading');
 
           const now = Date.now();
           const dt = (now - speedTrackerRef.current.lastTime) / 1000;
@@ -156,6 +200,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
             try {
               const resp = JSON.parse(xhr.responseText);
               if (resp.completed) {
+                emitRoomUploadProgress(fileId, file.name, 100, 'completed', true);
                 setUpload((prev) =>
                   prev
                     ? {
@@ -169,6 +214,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                 );
                 setTimeout(() => {
                   setUpload(null);
+                  onClearUploadProgress?.(fileId);
                   if (fileInputRef.current) fileInputRef.current.value = '';
                 }, 2000);
               }
@@ -194,7 +240,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         xhr.send(chunkBlob);
       });
     },
-    [roomId, hostToken, socketId]
+    [roomId, hostToken, socketId, emitRoomUploadProgress, onClearUploadProgress]
   );
 
   // Concurrent (попутная) chunk upload loop with concurrency pool
@@ -221,6 +267,14 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
             if (isCancelledRef.current) return;
             try {
               if (attempt > 0) {
+                const currentPercent =
+                  file.size > 0
+                    ? Math.min(
+                        99,
+                        Math.round(((completedChunksSetRef.current.size * CHUNK_SIZE) / file.size) * 100)
+                      )
+                    : 0;
+                emitRoomUploadProgress(fileId, file.name, currentPercent, 'retrying', true);
                 setUpload((prev) =>
                   prev ? { ...prev, status: 'retrying', retryAttempt: attempt } : null
                 );
@@ -245,6 +299,14 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
               if (isCancelledRef.current) return;
               attempt++;
               if (attempt > 3) {
+                const currentPercent =
+                  file.size > 0
+                    ? Math.min(
+                        99,
+                        Math.round(((completedChunksSetRef.current.size * CHUNK_SIZE) / file.size) * 100)
+                      )
+                    : 0;
+                emitRoomUploadProgress(fileId, file.name, currentPercent, 'error', true);
                 setUpload((prev) =>
                   prev
                     ? {
@@ -268,7 +330,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       );
       await Promise.all(workers);
     },
-    [uploadChunkWithProgress]
+    [uploadChunkWithProgress, emitRoomUploadProgress]
   );
 
   // File Picker Handler (Concurrent Chunked Upload initialization)
@@ -305,6 +367,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       remainingSeconds: 0,
       retryAttempt: 0,
     });
+    emitRoomUploadProgress(fileId, file.name, 0, 'uploading', true);
 
     const allChunks = Array.from({ length: totalChunks }, (_, i) => i);
     uploadChunkLoop(file, fileId, allChunks);
@@ -317,6 +380,11 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     setUpload((prev) =>
       prev ? { ...prev, status: 'uploading', errorMessage: null } : null
     );
+    const currentPercent =
+      upload.totalBytes > 0
+        ? Math.min(99, Math.round((upload.uploadedBytes / upload.totalBytes) * 100))
+        : 0;
+    emitRoomUploadProgress(upload.fileId, upload.file.name, currentPercent, 'uploading', true);
 
     const totalChunks = Math.ceil(upload.file.size / CHUNK_SIZE);
     const pendingChunks: number[] = [];
@@ -345,6 +413,9 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     const currentFileId = upload?.fileId;
     setUpload(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
+    if (currentFileId) {
+      onClearUploadProgress?.(currentFileId);
+    }
 
     if (currentFileId) {
       try {
