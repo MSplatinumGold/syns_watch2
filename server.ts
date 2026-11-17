@@ -147,17 +147,49 @@ function sanitizeReplyTo(raw: unknown): ChatReplyRef | undefined {
 }
 
 const REPLY_ACTION_TEMPLATES: Record<string, (actor: string, target: string, tail?: string) => string> = {
+  // Романтика, забота и нежность
   поцеловать: (a, t, tail) => (tail ? `💋 ${a} поцеловал ${t} ${tail}` : `💋 ${a} поцеловал ${t}`),
   поцелуй: (a, t, tail) => (tail ? `💋 ${a} поцеловал ${t} ${tail}` : `💋 ${a} поцеловал ${t}`),
   чмок: (a, t, tail) => (tail ? `💋 ${a} чмокнул ${t} ${tail}` : `💋 ${a} чмокнул ${t}`),
   чмокнуть: (a, t, tail) => (tail ? `💋 ${a} чмокнул ${t} ${tail}` : `💋 ${a} чмокнул ${t}`),
+  'воздушный поцелуй': (a, t, tail) =>
+    tail ? `😘 ${a} послал воздушный поцелуй ${t} ${tail}` : `😘 ${a} послал воздушный поцелуй ${t}`,
   обнять: (a, t, tail) => (tail ? `🫂 ${a} обнял ${t} ${tail}` : `🫂 ${a} обнял ${t}`),
   обними: (a, t, tail) => (tail ? `🫂 ${a} обнял ${t} ${tail}` : `🫂 ${a} обнял ${t}`),
   обнимаю: (a, t, tail) => (tail ? `🫂 ${a} обнял ${t} ${tail}` : `🫂 ${a} обнял ${t}`),
   обнимашки: (a, t, tail) => (tail ? `🫂 ${a} крепко обнял ${t} ${tail}` : `🫂 ${a} крепко обнял ${t}`),
+  прижать: (a, t, tail) => (tail ? `🫶 ${a} прижал ${t} ${tail}` : `🫶 ${a} крепко прижал к себе ${t}`),
+  прижми: (a, t, tail) => (tail ? `🫶 ${a} прижал ${t} ${tail}` : `🫶 ${a} крепко прижал к себе ${t}`),
+  приласкать: (a, t, tail) => (tail ? `🥰 ${a} приласкал ${t} ${tail}` : `🥰 ${a} приласкал ${t}`),
   погладить: (a, t, tail) => (tail ? `🥹 ${a} погладил ${t} ${tail}` : `🥹 ${a} погладил по голове ${t}`),
   погладь: (a, t, tail) => (tail ? `🥹 ${a} погладил ${t} ${tail}` : `🥹 ${a} погладил по голове ${t}`),
   глажу: (a, t, tail) => (tail ? `🥹 ${a} погладил ${t} ${tail}` : `🥹 ${a} погладил по голове ${t}`),
+  укрыть: (a, t, tail) => (tail ? `🧣 ${a} укрыл ${t} ${tail}` : `🧣 ${a} заботливо укрыл пледом ${t}`),
+  укрой: (a, t, tail) => (tail ? `🧣 ${a} укрыл ${t} ${tail}` : `🧣 ${a} заботливо укрыл пледом ${t}`),
+  'взять за руку': (a, t, tail) => (tail ? `🤝 ${a} взял за руку ${t} ${tail}` : `🤝 ${a} взял за руку ${t}`),
+  'держать за руку': (a, t, tail) => (tail ? `🤝 ${a} держит за руку ${t} ${tail}` : `🤝 ${a} держит за руку ${t}`),
+  почесать: (a, t, tail) => (tail ? `🐱 ${a} почесал ${t} ${tail}` : `🐱 ${a} почесал за ушком ${t}`),
+  почеши: (a, t, tail) => (tail ? `🐱 ${a} почесал ${t} ${tail}` : `🐱 ${a} почесал за ушком ${t}`),
+  потрепать: (a, t, tail) => (tail ? `🐾 ${a} потрепал ${t} ${tail}` : `🐾 ${a} потрепал по волосам ${t}`),
+  помассировать: (a, t, tail) => (tail ? `💆 ${a} сделал массаж ${t} ${tail}` : `💆 ${a} сделал массаж ${t}`),
+  массаж: (a, t, tail) => (tail ? `💆 ${a} сделал массаж ${t} ${tail}` : `💆 ${a} сделал массаж ${t}`),
+  убаюкать: (a, t, tail) => (tail ? `😴 ${a} убаюкал ${t} ${tail}` : `😴 ${a} убаюкал ${t}`),
+  люблю: (a, t) => `❤️ ${a} признался в любви ${t}`,
+
+  // Игривые и шуточные
+  пощекотать: (a, t, tail) => (tail ? `🤭 ${a} пощекотал ${t} ${tail}` : `🤭 ${a} пощекотал ${t}`),
+  щекотать: (a, t, tail) => (tail ? `🤭 ${a} пощекотал ${t} ${tail}` : `🤭 ${a} пощекотал ${t}`),
+  щекотка: (a, t, tail) => (tail ? `🤭 ${a} пощекотал ${t} ${tail}` : `🤭 ${a} пощекотал ${t}`),
+  ткнуть: (a, t, tail) => (tail ? `👉 ${a} ткнул ${t} ${tail}` : `👉 ${a} ткнул ${t}`),
+  тык: (a, t, tail) => (tail ? `👉 ${a} сделал тык ${t} ${tail}` : `👉 ${a} сделал тык ${t}`),
+  буп: (a, t, tail) => (tail ? `👃 ${a} сделал буп ${t} ${tail}` : `👃 ${a} сделал буп в носик ${t}`),
+  ущипнуть: (a, t, tail) => (tail ? `🤏 ${a} ущипнул ${t} ${tail}` : `🤏 ${a} ущипнул ${t}`),
+  щипнуть: (a, t, tail) => (tail ? `🤏 ${a} ущипнул ${t} ${tail}` : `🤏 ${a} ущипнул ${t}`),
+  понюхать: (a, t, tail) => (tail ? `👃 ${a} понюхал ${t} ${tail}` : `👃 ${a} понюхал ${t}`),
+  утащить: (a, t, tail) => (tail ? `🐾 ${a} утащил ${t} ${tail}` : `🐾 ${a} утащил ${t} в пледик`),
+  спрятать: (a, t, tail) => (tail ? `🫣 ${a} спрятал ${t} ${tail}` : `🫣 ${a} спрятал ${t}`),
+  закидать: (a, t, tail) => (tail ? `🛋️ ${a} закидал ${t} ${tail}` : `🛋️ ${a} закидал подушками ${t}`),
+  рассмешить: (a, t, tail) => (tail ? `😂 ${a} рассмешил ${t} ${tail}` : `😂 ${a} рассмешил ${t}`),
   ударить: (a, t, tail) => (tail ? `💥 ${a} ударил ${t} ${tail}` : `💥 ${a} ударил ${t}`),
   стукнуть: (a, t, tail) => (tail ? `💥 ${a} стукнул ${t} ${tail}` : `💥 ${a} стукнул ${t}`),
   треснуть: (a, t, tail) => (tail ? `💥 ${a} треснул ${t} ${tail}` : `💥 ${a} треснул ${t}`),
@@ -170,34 +202,112 @@ const REPLY_ACTION_TEMPLATES: Record<string, (actor: string, target: string, tai
   куснуть: (a, t, tail) => (tail ? `🦷 ${a} укусил ${t} ${tail}` : `🦷 ${a} укусил ${t}`),
   лизнуть: (a, t, tail) => (tail ? `👅 ${a} лизнул ${t} ${tail}` : `👅 ${a} лизнул ${t}`),
   лизь: (a, t, tail) => (tail ? `👅 ${a} лизнул ${t} ${tail}` : `👅 ${a} лизнул ${t}`),
+
+  // Еда, напитки и подарки
   покормить: (a, t, tail) => (tail ? `🍿 ${a} покормил ${t} ${tail}` : `🍿 ${a} покормил ${t}`),
   покорми: (a, t, tail) => (tail ? `🍿 ${a} покормил ${t} ${tail}` : `🍿 ${a} покормил ${t}`),
+  угостить: (a, t, tail) => (tail ? `🍪 ${a} угостил ${t} ${tail}` : `🍪 ${a} угостил вкусняшкой ${t}`),
+  угости: (a, t, tail) => (tail ? `🍪 ${a} угостил ${t} ${tail}` : `🍪 ${a} угостил вкусняшкой ${t}`),
+  напоить: (a, t, tail) => (tail ? `☕ ${a} напоил ${t} ${tail}` : `☕ ${a} напоил чаем ${t}`),
+  чай: (a, t, tail) => (tail ? `☕ ${a} налил чай для ${t} ${tail}` : `☕ ${a} налил чай для ${t}`),
+  налить: (a, t, tail) => (tail ? `☕ ${a} налил ${t} ${tail}` : `☕ ${a} налил чаю ${t}`),
+  налей: (a, t, tail) => (tail ? `☕ ${a} налил ${t} ${tail}` : `☕ ${a} налил чаю ${t}`),
+  насыпать: (a, t, tail) => (tail ? `🍿 ${a} насыпал ${t} ${tail}` : `🍿 ${a} насыпал попкорна ${t}`),
+  насыпь: (a, t, tail) => (tail ? `🍿 ${a} насыпал ${t} ${tail}` : `🍿 ${a} насыпал попкорна ${t}`),
+  чокнуться: (a, t, tail) => (tail ? `🥂 ${a} чокнулся с ${t} ${tail}` : `🥂 ${a} чокнулся с ${t}`),
+  выпить: (a, t, tail) => (tail ? `🥂 ${a} выпил с ${t} ${tail}` : `🥂 ${a} выпил с ${t}`),
+  'подарить цветы': (a, t, tail) => (tail ? `💐 ${a} подарил цветы ${t} ${tail}` : `💐 ${a} подарил цветы ${t}`),
+  цветы: (a, t, tail) => (tail ? `💐 ${a} подарил цветы ${t} ${tail}` : `💐 ${a} подарил цветы ${t}`),
+  подарить: (a, t, tail) => (tail ? `🎁 ${a} подарил ${t} ${tail}` : `🎁 ${a} сделал подарок ${t}`),
+  дать: (a, t, tail) => (tail ? `🎁 ${a} дал ${t} ${tail}` : `🎁 ${a} дал что-то ${t}`),
+  дай: (a, t, tail) => (tail ? `🎁 ${a} дал ${t} ${tail}` : `🎁 ${a} дал что-то ${t}`),
+  даю: (a, t, tail) => (tail ? `🎁 ${a} дал ${t} ${tail}` : `🎁 ${a} дал что-то ${t}`),
+  передать: (a, t, tail) => (tail ? `📩 ${a} передал ${t} ${tail}` : `📩 ${a} передал привет ${t}`),
+  передай: (a, t, tail) => (tail ? `📩 ${a} передал ${t} ${tail}` : `📩 ${a} передал привет ${t}`),
+  отдать: (a, t, tail) => (tail ? `🎁 ${a} отдал ${t} ${tail}` : `🎁 ${a} отдал подарок ${t}`),
+  отдай: (a, t, tail) => (tail ? `🎁 ${a} отдал ${t} ${tail}` : `🎁 ${a} отдал подарок ${t}`),
+  вручить: (a, t, tail) => (tail ? `🏆 ${a} вручил ${t} ${tail}` : `🏆 ${a} вручил награду ${t}`),
+  вручи: (a, t, tail) => (tail ? `🏆 ${a} вручил ${t} ${tail}` : `🏆 ${a} вручил награду ${t}`),
+  принести: (a, t, tail) => (tail ? `🍽️ ${a} принёс ${t} ${tail}` : `🍽️ ${a} принёс вкусняшку ${t}`),
+  принеси: (a, t, tail) => (tail ? `🍽️ ${a} принёс ${t} ${tail}` : `🍽️ ${a} принёс вкусняшку ${t}`),
+  купить: (a, t, tail) => (tail ? `🛍️ ${a} купил ${t} ${tail}` : `🛍️ ${a} купил подарок ${t}`),
+  купи: (a, t, tail) => (tail ? `🛍️ ${a} купил ${t} ${tail}` : `🛍️ ${a} купил подарок ${t}`),
+  показать: (a, t, tail) => (tail ? `👀 ${a} показал ${t} ${tail}` : `👀 ${a} показал кое-что ${t}`),
+  покажи: (a, t, tail) => (tail ? `👀 ${a} показал ${t} ${tail}` : `👀 ${a} показал кое-что ${t}`),
+  сделать: (a, t, tail) => (tail ? `✨ ${a} сделал ${t} ${tail}` : `✨ ${a} сделал приятное ${t}`),
+  сделай: (a, t, tail) => (tail ? `✨ ${a} сделал ${t} ${tail}` : `✨ ${a} сделал приятное ${t}`),
+  надеть: (a, t, tail) => (tail ? `🧢 ${a} надел на ${t} ${tail}` : `🧢 ${a} надел корону на ${t}`),
+  надень: (a, t, tail) => (tail ? `🧢 ${a} надел на ${t} ${tail}` : `🧢 ${a} надел корону на ${t}`),
+  кинуть: (a, t, tail) => (tail ? `🎯 ${a} кинул в ${t} ${tail}` : `🎯 ${a} кинул подушку в ${t}`),
+  бросить: (a, t, tail) => (tail ? `🎯 ${a} бросил в ${t} ${tail}` : `🎯 ${a} бросил подушку в ${t}`),
+  шепнуть: (a, t, tail) => (tail ? `🤫 ${a} шепнул ${t} ${tail}` : `🤫 ${a} что-то шепнул ${t}`),
+  прошептать: (a, t, tail) => (tail ? `🤫 ${a} прошептал ${t} ${tail}` : `🤫 ${a} что-то прошептал ${t}`),
+
+  // Эмоции, общение и поддержка
   'дать пять': (a, t, tail) => (tail ? `🙌 ${a} дал пять ${t} ${tail}` : `🙌 ${a} дал пять ${t}`),
   'дай пять': (a, t, tail) => (tail ? `🙌 ${a} дал пять ${t} ${tail}` : `🙌 ${a} дал пять ${t}`),
   пятюня: (a, t, tail) => (tail ? `🙌 ${a} дал пять ${t} ${tail}` : `🙌 ${a} дал пять ${t}`),
   'пожать руку': (a, t, tail) => (tail ? `🤝 ${a} пожал руку ${t} ${tail}` : `🤝 ${a} пожал руку ${t}`),
   'жму руку': (a, t, tail) => (tail ? `🤝 ${a} пожал руку ${t} ${tail}` : `🤝 ${a} пожал руку ${t}`),
+  помахать: (a, t, tail) => (tail ? `👋 ${a} помахал ${t} ${tail}` : `👋 ${a} помахал ${t}`),
   подмигнуть: (a, t, tail) => (tail ? `😉 ${a} подмигнул ${t} ${tail}` : `😉 ${a} подмигнул ${t}`),
   улыбнуться: (a, t, tail) => (tail ? `😊 ${a} улыбнулся ${t} ${tail}` : `😊 ${a} улыбнулся ${t}`),
+  потанцевать: (a, t, tail) => (tail ? `💃 ${a} позвал танцевать ${t} ${tail}` : `💃 ${a} позвал танцевать ${t}`),
+  танцевать: (a, t, tail) => (tail ? `💃 ${a} позвал танцевать ${t} ${tail}` : `💃 ${a} позвал танцевать ${t}`),
   похлопать: (a, t, tail) => (tail ? `👏 ${a} похлопал ${t} ${tail}` : `👏 ${a} похлопал ${t}`),
   аплодисменты: (a, t, tail) => (tail ? `👏 ${a} поаплодировал ${t} ${tail}` : `👏 ${a} поаплодировал ${t}`),
   похвалить: (a, t, tail) => (tail ? `🌟 ${a} похвалил ${t} ${tail}` : `🌟 ${a} похвалил ${t}`),
   молодец: (a, t, tail) => (tail ? `🌟 ${a} похвалил ${t} ${tail}` : `🌟 ${a} похвалил ${t}`),
+  восхититься: (a, t, tail) => (tail ? `🤩 ${a} восхитился ${t} ${tail}` : `🤩 ${a} восхитился ${t}`),
+  милота: (a, t, tail) => (tail ? `🎀 ${a} умилился с ${t} ${tail}` : `🎀 ${a} умилился с ${t}`),
+  поддержать: (a, t, tail) => (tail ? `💪 ${a} поддержал ${t} ${tail}` : `💪 ${a} поддержал ${t}`),
+  подбодрить: (a, t, tail) => (tail ? `✨ ${a} подбодрил ${t} ${tail}` : `✨ ${a} подбодрил ${t}`),
   утешить: (a, t, tail) => (tail ? `❤️‍🩹 ${a} утешил ${t} ${tail}` : `❤️‍🩹 ${a} утешил ${t}`),
   пожалеть: (a, t, tail) => (tail ? `❤️‍🩹 ${a} пожалел ${t} ${tail}` : `❤️‍🩹 ${a} пожалел ${t}`),
   поблагодарить: (a, t, tail) => (tail ? `🙏 ${a} поблагодарил ${t} ${tail}` : `🙏 ${a} поблагодарил ${t}`),
   спасибо: (a, t, tail) => (tail ? `🙏 ${a} поблагодарил ${t} ${tail}` : `🙏 ${a} поблагодарил ${t}`),
+  поздравить: (a, t, tail) => (tail ? `🎉 ${a} поздравил ${t} ${tail}` : `🎉 ${a} поздравил ${t}`),
+  поздравляю: (a, t, tail) => (tail ? `🎉 ${a} поздравил ${t} ${tail}` : `🎉 ${a} поздравил ${t}`),
   извиниться: (a, t, tail) => (tail ? `🙇 ${a} извинился перед ${t} ${tail}` : `🙇 ${a} извинился перед ${t}`),
   прости: (a, t, tail) => (tail ? `🙇 ${a} попросил прощения у ${t} ${tail}` : `🙇 ${a} попросил прощения у ${t}`),
   извини: (a, t, tail) => (tail ? `🙇 ${a} извинился перед ${t} ${tail}` : `🙇 ${a} извинился перед ${t}`),
-  'подарить цветы': (a, t, tail) => (tail ? `💐 ${a} подарил цветы ${t} ${tail}` : `💐 ${a} подарил цветы ${t}`),
-  цветы: (a, t, tail) => (tail ? `💐 ${a} подарил цветы ${t} ${tail}` : `💐 ${a} подарил цветы ${t}`),
-  чокнуться: (a, t, tail) => (tail ? `🥂 ${a} чокнулся с ${t} ${tail}` : `🥂 ${a} чокнулся с ${t}`),
-  выпить: (a, t, tail) => (tail ? `🥂 ${a} выпил с ${t} ${tail}` : `🥂 ${a} выпил с ${t}`),
   разбудить: (a, t, tail) => (tail ? `⏰ ${a} разбудил ${t} ${tail}` : `⏰ ${a} разбудил ${t}`),
   проснись: (a, t, tail) => (tail ? `⏰ ${a} разбудил ${t} ${tail}` : `⏰ ${a} разбудил ${t}`),
-  люблю: (a, t) => `❤️ ${a} признался в любви ${t}`,
+  'спокойной ночи': (a, t, tail) =>
+    tail ? `🌙 ${a} пожелал спокойной ночи ${t} ${tail}` : `🌙 ${a} пожелал спокойной ночи ${t}`,
+  'пожелать спокойной ночи': (a, t, tail) =>
+    tail ? `🌙 ${a} пожелал спокойной ночи ${t} ${tail}` : `🌙 ${a} пожелал спокойной ночи ${t}`,
 };
+
+const PREFIX_ONLY_ACTION_KEYS = new Set([
+  'дать',
+  'дай',
+  'даю',
+  'передать',
+  'передай',
+  'отдать',
+  'отдай',
+  'вручить',
+  'вручи',
+  'принести',
+  'принеси',
+  'купить',
+  'купи',
+  'налить',
+  'налей',
+  'насыпать',
+  'насыпь',
+  'показать',
+  'покажи',
+  'сделать',
+  'сделай',
+  'надеть',
+  'надень',
+  'кинуть',
+  'бросить',
+  'шепнуть',
+  'прошептать',
+]);
 
 function sanitizeActionTail(rawTail: string): string | undefined {
   let clean = rawTail
@@ -205,7 +315,7 @@ function sanitizeActionTail(rawTail: string): string | undefined {
     .replace(/\s+/g, ' ')
     .replace(/^[.,!?;:()\s]+|[.,!?;:\s]+$/g, '')
     .trim();
-  clean = clean.replace(/^(?:тебя|вас)(?:\s+|$)/i, '').trim();
+  clean = clean.replace(/^(?:тебя|тебе|вас|вам)(?:\s+|$)/i, '').trim();
   if (!clean) return undefined;
   const words = clean.split(' ');
   if (words.length > 6) return undefined;
@@ -227,7 +337,7 @@ function buildReplyActionText(actorNick: string, targetNick: string, text: strin
     return exactBuilder(actorNick, targetNick);
   }
 
-  // Match prefix trigger + arbitrary continuation (e.g., "поцеловать в щеку", "укусить за ушко")
+  // Match prefix trigger + arbitrary continuation (e.g., "поцеловать в щеку", "дать печеньку")
   const rawTokens = rawClean.split(' ');
   const normTokens = rawTokens.map((tok) =>
     tok
@@ -237,6 +347,14 @@ function buildReplyActionText(actorNick: string, targetNick: string, text: strin
   );
 
   if (rawTokens.length <= 8) {
+    if (normTokens.length >= 3) {
+      const trigramPrefix = `${normTokens[0]} ${normTokens[1]} ${normTokens[2]}`;
+      const trigramBuilder = REPLY_ACTION_TEMPLATES[trigramPrefix];
+      if (trigramBuilder) {
+        const tail = sanitizeActionTail(rawTokens.slice(3).join(' '));
+        return trigramBuilder(actorNick, targetNick, tail);
+      }
+    }
     if (normTokens.length >= 2) {
       const bigramPrefix = `${normTokens[0]} ${normTokens[1]}`;
       const bigramBuilder = REPLY_ACTION_TEMPLATES[bigramPrefix];
@@ -254,13 +372,22 @@ function buildReplyActionText(actorNick: string, targetNick: string, text: strin
 
   const words = norm.split(' ');
   if (words.length <= 5) {
+    for (let i = 0; i < words.length - 2; i++) {
+      const trigram = `${words[i]} ${words[i + 1]} ${words[i + 2]}`;
+      const trigramBuilder = !PREFIX_ONLY_ACTION_KEYS.has(trigram)
+        ? REPLY_ACTION_TEMPLATES[trigram]
+        : undefined;
+      if (trigramBuilder) return trigramBuilder(actorNick, targetNick);
+    }
     for (let i = 0; i < words.length - 1; i++) {
       const bigram = `${words[i]} ${words[i + 1]}`;
-      const bigramBuilder = REPLY_ACTION_TEMPLATES[bigram];
+      const bigramBuilder = !PREFIX_ONLY_ACTION_KEYS.has(bigram)
+        ? REPLY_ACTION_TEMPLATES[bigram]
+        : undefined;
       if (bigramBuilder) return bigramBuilder(actorNick, targetNick);
     }
     for (const w of words) {
-      const wordBuilder = REPLY_ACTION_TEMPLATES[w];
+      const wordBuilder = !PREFIX_ONLY_ACTION_KEYS.has(w) ? REPLY_ACTION_TEMPLATES[w] : undefined;
       if (wordBuilder) return wordBuilder(actorNick, targetNick);
     }
   }
