@@ -18,13 +18,25 @@ import {
   Check,
   UploadCloud,
   CheckCircle2,
+  Mic,
+  MicOff,
+  Volume2,
+  MessageSquare,
 } from 'lucide-react';
-import type { ChatMessage, ChatReplyRef, RoomUploadProgress, User } from '../types/watchparty.ts';
+import type {
+  ChatMessage,
+  ChatReplyRef,
+  RoomUploadProgress,
+  User,
+  VoiceMode,
+} from '../types/watchparty.ts';
 import { formatBytes, parseTime } from '../utils/format.ts';
 import { STICKER_PACKS } from '../utils/stickers.ts';
+import { compressChatImage } from '../utils/imageCompress.ts';
 import { StickerAsset } from './StickerAsset.tsx';
 
 const MAX_CHAT_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB limit per file
+const MAX_RAW_COMPRESSIBLE_IMAGE_BYTES = 35 * 1024 * 1024; // Allow up to 35 MB camera photos before client compression
 
 const CUTE_QUICK_ACTIONS = [
   { label: '💋 Поцеловать', word: 'поцеловать' },
@@ -68,6 +80,16 @@ interface ChatPanelProps {
   isKeyboardOpen?: boolean;
   typingNicknames?: string[];
   roomUploadProgress?: RoomUploadProgress | null;
+  voiceMode?: VoiceMode;
+  isMicOn?: boolean;
+  isSelfSpeaking?: boolean;
+  speakingNicknames?: string[];
+  voiceError?: string | null;
+  audioAutoplayBlocked?: boolean;
+  onToggleMic?: () => void;
+  onSwitchVoiceMode?: (mode: VoiceMode) => void;
+  onClearVoiceError?: () => void;
+  onUnlockVoiceAudio?: () => void;
   onSendMessage: (text: string, replyTo?: ChatReplyRef, stickerId?: string) => void;
   onEditMessage: (messageId: string, text: string) => void;
   onDeleteMessage: (messageId: string) => void;
@@ -88,6 +110,16 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   isKeyboardOpen = false,
   typingNicknames = [],
   roomUploadProgress = null,
+  voiceMode = 'text',
+  isMicOn = false,
+  isSelfSpeaking = false,
+  speakingNicknames = [],
+  voiceError = null,
+  audioAutoplayBlocked = false,
+  onToggleMic,
+  onSwitchVoiceMode,
+  onClearVoiceError,
+  onUnlockVoiceAudio,
   onSendMessage,
   onEditMessage,
   onDeleteMessage,
@@ -99,6 +131,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [activeStickerPackId, setActiveStickerPackId] = useState<string>(STICKER_PACKS[0].id);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingCompressionInfo, setPendingCompressionInfo] = useState<{
+    originalSize: number;
+    compressedSize: number;
+  } | null>(null);
+  const [isCompressingImage, setIsCompressingImage] = useState(false);
   const [pendingPreviewUrl, setPendingPreviewUrl] = useState<string | null>(null);
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
@@ -124,6 +161,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (voiceMode === 'voice') {
+      setShowStickerPicker(false);
+      onTypingChange?.(false);
+    }
+  }, [voiceMode, onTypingChange]);
 
   useEffect(() => {
     if (!activeMenuMessageId && !showStickerPicker && !showActionsHelp) return;
@@ -181,16 +225,56 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     }
   }, [messages, currentUserId]);
 
-  const handleSelectMediaFile = (file: File | null) => {
+  const handleSelectMediaFile = async (file: File | null) => {
     setMediaError(null);
     if (!file) return;
 
     const isAllowed =
-      file.type.startsWith('image/') ||
+      (file.type.startsWith('image/') && file.type !== 'image/svg+xml') ||
       file.type.startsWith('video/') ||
       file.type.startsWith('audio/');
     if (!isAllowed) {
-      setMediaError('Поддерживаются только картинки, GIF, видео и аудио.');
+      setMediaError('Поддерживаются только картинки (PNG/JPG/GIF/WebP), видео и аудио.');
+      return;
+    }
+
+    const isCompressibleImage =
+      file.type.startsWith('image/') && file.type !== 'image/gif' && file.type !== 'image/svg+xml';
+
+    if (isCompressibleImage) {
+      if (file.size > MAX_RAW_COMPRESSIBLE_IMAGE_BYTES) {
+        setMediaError(
+          `Файл слишком большой (${formatBytes(file.size)}). Максимум — 35 МБ до сжатия.`
+        );
+        return;
+      }
+
+      setIsCompressingImage(true);
+      try {
+        const result = await compressChatImage(file, {
+          maxDimension: 1280,
+          quality: 0.8,
+        });
+
+        if (result.file.size > MAX_CHAT_MEDIA_BYTES) {
+          setMediaError(
+            `Даже после сжатия файл больше 10 МБ (${formatBytes(result.file.size)}).`
+          );
+          return;
+        }
+
+        setPendingFile(result.file);
+        setPendingCompressionInfo(
+          result.wasCompressed
+            ? {
+                originalSize: result.originalSize,
+                compressedSize: result.compressedSize,
+              }
+            : null
+        );
+      } finally {
+        setIsCompressingImage(false);
+      }
       return;
     }
 
@@ -201,6 +285,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       return;
     }
 
+    setPendingCompressionInfo(null);
     setPendingFile(file);
   };
 
@@ -254,6 +339,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const startEdit = (msg: ChatMessage) => {
     setReplyingTo(null);
     setPendingFile(null);
+    setPendingCompressionInfo(null);
     setMediaError(null);
     if (mediaInputRef.current) mediaInputRef.current.value = '';
     setEditingMessage(msg);
@@ -338,6 +424,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         }
 
         setPendingFile(null);
+        setPendingCompressionInfo(null);
         setText('');
         setReplyingTo(null);
         resetTextareaHeight();
@@ -647,6 +734,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                     {isMsgHost && <Crown className="w-3 h-3 fill-amber-400 text-amber-400" />}
                     {msg.nickname}
                   </span>
+                  {(isMe ? isSelfSpeaking : Boolean(users[msg.userId]?.isSpeaking)) && (
+                    <span
+                      className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[9px] font-semibold animate-pulse"
+                      title="Сейчас говорит в голосовом чате"
+                    >
+                      <Mic className="w-2.5 h-2.5" />
+                    </span>
+                  )}
                   <span className="text-[10px] text-neutral-500 font-mono">
                     {formatMessageTime(msg.timestamp)}
                   </span>
@@ -834,6 +929,34 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         )}
       </div>
 
+      {/* Live Voice Speaking Indicator in Chat */}
+      {speakingNicknames.length > 0 && !isKeyboardOpen && (
+        <div className="px-3 py-1.5 bg-emerald-950/50 border-t border-emerald-500/30 text-[11px] text-emerald-300 flex items-center gap-2 shrink-0">
+          <span className="relative flex h-2 w-2 shrink-0">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400" />
+          </span>
+          <Mic className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span className="truncate font-medium">
+            {speakingNicknames.length === 1
+              ? `${speakingNicknames[0]} говорит:`
+              : `${speakingNicknames.slice(0, 3).join(', ')} говорят:`}
+          </span>
+        </div>
+      )}
+
+      {/* Autoplay unlock prompt if browser suspended incoming voice audio */}
+      {audioAutoplayBlocked && onUnlockVoiceAudio && !isKeyboardOpen && (
+        <button
+          type="button"
+          onClick={onUnlockVoiceAudio}
+          className="w-full px-3 py-1.5 bg-amber-500/15 hover:bg-amber-500/25 border-t border-amber-500/30 text-amber-200 text-[11px] font-medium flex items-center justify-center gap-1.5 cursor-pointer shrink-0 transition"
+        >
+          <Volume2 className="w-3.5 h-3.5 text-amber-300" />
+          <span>Нажмите, чтобы включить звук голосового чата</span>
+        </button>
+      )}
+
       {/* Typing indicator */}
       {typingNicknames.length > 0 && !isKeyboardOpen && (
         <div className="px-3 py-1 bg-neutral-900/90 border-t border-neutral-800/70 text-[11px] text-neutral-400 flex items-center gap-1.5 shrink-0">
@@ -970,6 +1093,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           </div>
         )}
 
+        {/* Image Compression Progress */}
+        {isCompressingImage && (
+          <div className="px-2.5 py-1.5 rounded-xl bg-neutral-900 border border-neutral-700 text-neutral-300 text-[11px] flex items-center gap-2">
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400 shrink-0" />
+            <span>Сжимаем фото перед отправкой...</span>
+          </div>
+        )}
+
         {/* Pending Media Attachment Preview */}
         {pendingFile && (
           <div className="px-2.5 py-1.5 rounded-xl bg-neutral-900 border border-neutral-700 flex items-center justify-between gap-2">
@@ -996,7 +1127,16 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               <div className="min-w-0">
                 <p className="text-xs text-white font-medium truncate">{pendingFile.name}</p>
                 <p className="text-[10px] text-neutral-400 font-mono">
-                  {formatBytes(pendingFile.size)} / 10 МБ макс.
+                  {pendingCompressionInfo ? (
+                    <>
+                      <span className="text-emerald-400 font-semibold">
+                        Сжато: {formatBytes(pendingCompressionInfo.originalSize)} →{' '}
+                        {formatBytes(pendingCompressionInfo.compressedSize)}
+                      </span>
+                    </>
+                  ) : (
+                    `${formatBytes(pendingFile.size)} / 10 МБ макс.`
+                  )}
                 </p>
               </div>
             </div>
@@ -1005,6 +1145,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               disabled={isUploadingMedia}
               onClick={() => {
                 setPendingFile(null);
+                setPendingCompressionInfo(null);
                 if (mediaInputRef.current) mediaInputRef.current.value = '';
               }}
               className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer disabled:opacity-40"
@@ -1107,125 +1248,193 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           className="hidden"
         />
 
-        <div className="flex items-end gap-1.5 sm:gap-2">
-          <button
-            type="button"
-            disabled={isUploadingMedia || Boolean(editingMessage)}
-            onClick={() => mediaInputRef.current?.click()}
-            className={`p-2 rounded-xl border transition cursor-pointer shrink-0 disabled:opacity-40 ${
-              pendingFile
-                ? 'bg-rose-500/20 border-rose-500/50 text-rose-400'
-                : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
-            }`}
-            title="Прикрепить медиа (фото, GIF, видео, аудио до 10 МБ)"
-          >
-            <Paperclip className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            disabled={Boolean(editingMessage)}
-            onClick={(e) => {
-              e.stopPropagation();
-              setShowStickerPicker((prev) => !prev);
-            }}
-            className={`p-2 rounded-xl border transition cursor-pointer shrink-0 disabled:opacity-40 ${
-              showStickerPicker
-                ? 'bg-amber-500/20 border-amber-500/50 text-amber-400'
-                : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
-            }`}
-            title="Стикеры"
-          >
-            <Sticker className="w-4 h-4" />
-          </button>
-
-          {/* Using textarea instead of form+input prevents Chrome Android Password/Card/Address autofill bar */}
-          <textarea
-            ref={textareaRef}
-            rows={1}
-            name="syncwatch_chat_msg"
-            autoComplete="off"
-            enterKeyHint="send"
-            data-form-type="other"
-            data-lpignore="true"
-            placeholder={
-              editingMessage
-                ? 'Изменить текст сообщения...'
-                : pendingFile
-                ? 'Подпись (необязательно)...'
-                : 'Написать в чат...'
-            }
-            value={text}
-            onChange={(e) => {
-              const nextVal = e.target.value;
-              setText(nextVal);
-              e.target.style.height = 'auto';
-              e.target.style.height = `${Math.min(e.target.scrollHeight, 84)}px`;
-
-              if (onTypingChange && !editingMessage) {
-                const now = Date.now();
-                if (nextVal.trim().length > 0) {
-                  if (now - lastTypingEmitAtRef.current > 2000) {
-                    lastTypingEmitAtRef.current = now;
-                    onTypingChange(true);
-                  }
-                } else {
-                  lastTypingEmitAtRef.current = 0;
-                  onTypingChange(false);
-                }
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape' && editingMessage) {
-                e.preventDefault();
-                cancelEdit();
-                return;
-              }
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                submitMessage();
-              }
-            }}
-            onPaste={handlePaste}
-            onFocus={() => {
-              setTimeout(() => {
-                const el = containerRef.current;
-                if (el) el.scrollTop = el.scrollHeight;
-              }, 150);
-            }}
-            className={`flex-1 min-w-0 bg-neutral-900 border ${
-              editingMessage
-                ? 'border-amber-500/70 focus:border-amber-400'
-                : 'border-neutral-700 focus:border-rose-500'
-            } text-neutral-200 placeholder-neutral-500 text-base sm:text-xs md:text-sm rounded-xl px-3 py-1.5 sm:py-2 outline-none transition resize-none overflow-y-auto max-h-[84px] leading-snug`}
-          />
-
-          <button
-            type="button"
-            onClick={() => submitMessage()}
-            disabled={
-              isUploadingMedia ||
-              (editingMessage
-                ? !text.trim() && !(editingMessage.media && !editingMessage.media.expired)
-                : !text.trim() && !pendingFile)
-            }
-            className={`p-2 rounded-xl text-white transition shadow cursor-pointer shrink-0 disabled:opacity-40 ${
-              editingMessage
-                ? 'bg-amber-600 hover:bg-amber-500 disabled:hover:bg-amber-600'
-                : 'bg-rose-600 hover:bg-rose-500 disabled:hover:bg-rose-600'
-            }`}
-            title={editingMessage ? 'Сохранить изменения (Enter)' : 'Отправить (Enter)'}
-          >
-            {isUploadingMedia ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : editingMessage ? (
-              <Check className="w-4 h-4" />
-            ) : (
-              <Send className="w-4 h-4" />
+        {voiceMode === 'voice' ? (
+          <div className="space-y-1.5">
+            {voiceError && (
+              <div className="px-2.5 py-1.5 rounded-xl bg-amber-950/70 border border-amber-700/50 text-amber-200 text-[11px] flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="truncate">{voiceError}</span>
+                </div>
+                {onClearVoiceError && (
+                  <button
+                    type="button"
+                    onClick={onClearVoiceError}
+                    className="text-amber-300 hover:text-white cursor-pointer shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             )}
-          </button>
-        </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onToggleMic?.()}
+                className={`flex-1 min-h-[44px] px-3.5 py-2 rounded-xl border text-xs sm:text-sm font-semibold transition cursor-pointer flex items-center justify-center gap-2.5 active:scale-[0.99] ${
+                  isMicOn
+                    ? isSelfSpeaking
+                      ? 'bg-emerald-600/25 hover:bg-emerald-600/35 border-emerald-400 text-emerald-200 shadow-lg shadow-emerald-600/20'
+                      : 'bg-emerald-600/15 hover:bg-emerald-600/25 border-emerald-500/60 text-emerald-300'
+                    : 'bg-neutral-900 hover:bg-neutral-800 border-neutral-700 text-neutral-300 hover:text-white'
+                }`}
+              >
+                {isMicOn ? (
+                  <>
+                    <Mic
+                      className={`w-4 h-4 text-emerald-400 shrink-0 ${
+                        isSelfSpeaking ? 'animate-pulse' : ''
+                      }`}
+                    />
+                    <span>Вы говорите</span>
+                    <span className="text-[11px] font-medium px-2 py-0.5 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-200">
+                      Выключить микрофон
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <MicOff className="w-4 h-4 text-neutral-400 shrink-0" />
+                    <span>Микрофон выключен</span>
+                  </>
+                )}
+              </button>
+
+              {onSwitchVoiceMode && (
+                <button
+                  type="button"
+                  onClick={() => onSwitchVoiceMode('text')}
+                  className="min-h-[44px] min-w-[44px] px-2.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-400 hover:text-white transition cursor-pointer flex items-center justify-center shrink-0"
+                  title="Переключиться в текстовый чат (чтобы писать сообщения)"
+                >
+                  <MessageSquare className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-end gap-1.5 sm:gap-2">
+            <button
+              type="button"
+              disabled={isUploadingMedia || isCompressingImage || Boolean(editingMessage)}
+              onClick={() => mediaInputRef.current?.click()}
+              className={`p-2 rounded-xl border transition cursor-pointer shrink-0 disabled:opacity-40 ${
+                pendingFile
+                  ? 'bg-rose-500/20 border-rose-500/50 text-rose-400'
+                  : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
+              }`}
+              title="Прикрепить медиа (фото, GIF, видео, аудио до 10 МБ)"
+            >
+              <Paperclip className="w-4 h-4" />
+            </button>
+
+            <button
+              type="button"
+              disabled={Boolean(editingMessage)}
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowStickerPicker((prev) => !prev);
+              }}
+              className={`p-2 rounded-xl border transition cursor-pointer shrink-0 disabled:opacity-40 ${
+                showStickerPicker
+                  ? 'bg-amber-500/20 border-amber-500/50 text-amber-400'
+                  : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
+              }`}
+              title="Стикеры"
+            >
+              <Sticker className="w-4 h-4" />
+            </button>
+
+            {/* Using textarea instead of form+input prevents Chrome Android Password/Card/Address autofill bar */}
+            <textarea
+              ref={textareaRef}
+              rows={1}
+              name="syncwatch_chat_msg"
+              autoComplete="off"
+              enterKeyHint="send"
+              data-form-type="other"
+              data-lpignore="true"
+              placeholder={
+                editingMessage
+                  ? 'Изменить текст сообщения...'
+                  : pendingFile
+                  ? 'Подпись (необязательно)...'
+                  : 'Написать в чат...'
+              }
+              value={text}
+              onChange={(e) => {
+                const nextVal = e.target.value;
+                setText(nextVal);
+                e.target.style.height = 'auto';
+                e.target.style.height = `${Math.min(e.target.scrollHeight, 84)}px`;
+
+                if (onTypingChange && !editingMessage) {
+                  const now = Date.now();
+                  if (nextVal.trim().length > 0) {
+                    if (now - lastTypingEmitAtRef.current > 2000) {
+                      lastTypingEmitAtRef.current = now;
+                      onTypingChange(true);
+                    }
+                  } else {
+                    lastTypingEmitAtRef.current = 0;
+                    onTypingChange(false);
+                  }
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && editingMessage) {
+                  e.preventDefault();
+                  cancelEdit();
+                  return;
+                }
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  submitMessage();
+                }
+              }}
+              onPaste={handlePaste}
+              onFocus={() => {
+                setTimeout(() => {
+                  const el = containerRef.current;
+                  if (el) el.scrollTop = el.scrollHeight;
+                }, 150);
+              }}
+              className={`flex-1 min-w-0 bg-neutral-900 border ${
+                editingMessage
+                  ? 'border-amber-500/70 focus:border-amber-400'
+                  : 'border-neutral-700 focus:border-rose-500'
+              } text-neutral-200 placeholder-neutral-500 text-base sm:text-xs md:text-sm rounded-xl px-3 py-1.5 sm:py-2 outline-none transition resize-none overflow-y-auto max-h-[84px] leading-snug`}
+            />
+
+            <button
+              type="button"
+              onClick={() => submitMessage()}
+              disabled={
+                isUploadingMedia ||
+                isCompressingImage ||
+                (editingMessage
+                  ? !text.trim() && !(editingMessage.media && !editingMessage.media.expired)
+                  : !text.trim() && !pendingFile)
+              }
+              className={`p-2 rounded-xl text-white transition shadow cursor-pointer shrink-0 disabled:opacity-40 ${
+                editingMessage
+                  ? 'bg-amber-600 hover:bg-amber-500 disabled:hover:bg-amber-600'
+                  : 'bg-rose-600 hover:bg-rose-500 disabled:hover:bg-rose-600'
+              }`}
+              title={editingMessage ? 'Сохранить изменения (Enter)' : 'Отправить (Enter)'}
+            >
+              {isUploadingMedia ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : editingMessage ? (
+                <Check className="w-4 h-4" />
+              ) : (
+                <Send className="w-4 h-4" />
+              )}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
 };
+

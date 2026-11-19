@@ -31,6 +31,7 @@ import { DanmakuOverlay, FloatingEmojisOverlay } from './DanmakuOverlay.tsx';
 
 interface VideoPlayerProps {
   currentTrack: PlaylistItem | undefined;
+  localTrackUrl?: string;
   playlist: PlaylistItem[];
   currentTrackIndex: number;
   isHost: boolean;
@@ -54,6 +55,7 @@ interface VideoPlayerProps {
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   currentTrack,
+  localTrackUrl,
   playlist,
   currentTrackIndex,
   isHost,
@@ -109,6 +111,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [preloadProgress, setPreloadProgress] = useState<number | null>(null);
   const [isFullyPreloaded, setIsFullyPreloaded] = useState(false);
   const [preloadedBlobUrl, setPreloadedBlobUrl] = useState<string | null>(null);
+  const [localFallbackFailed, setLocalFallbackFailed] = useState(false);
   const [bufferAheadSeconds, setBufferAheadSeconds] = useState(0);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const preloadControllerRef = useRef<AbortController | null>(null);
@@ -190,8 +193,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [playbackState.currentTime, playbackState.lastUpdatedServerTime]);
 
-  // Video source handling: prioritizes local preloaded blob if available, else network stream URL
-  const videoSourceUrl = preloadedBlobUrl || currentTrack?.url;
+  // Video source handling: prioritizes uploader's local file URL, then preloaded blob, else network stream URL
+  const isUsingLocalFile = Boolean(localTrackUrl && !localFallbackFailed);
+  const videoSourceUrl = isUsingLocalFile ? localTrackUrl : (preloadedBlobUrl || currentTrack?.url);
+
+  // Reset local fallback flag if track or local URL changes
+  useEffect(() => {
+    setLocalFallbackFailed(false);
+  }, [currentTrack?.id, localTrackUrl]);
 
   // Cleanup preloaded blob, abort controller, and timers on unmount
   useEffect(() => {
@@ -241,7 +250,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Handler to preload full video in advance into browser memory (Item 2)
   const handlePreloadFullVideo = async () => {
     const rawUrl = currentTrack?.url;
-    if (!rawUrl || preloadProgress !== null || isFullyPreloaded) return;
+    if (!rawUrl || isUsingLocalFile || preloadProgress !== null || isFullyPreloaded) return;
 
     setPreloadProgress(0);
     const controller = new AbortController();
@@ -322,7 +331,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const video = videoRef.current;
       if (!video || !duration || duration <= 0) return;
 
-      if (isFullyPreloaded) {
+      if (isUsingLocalFile || isFullyPreloaded) {
         setBufferAheadSeconds(duration);
         return;
       }
@@ -340,7 +349,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }, 1000);
 
     return () => clearInterval(bufferCheckInterval);
-  }, [videoSourceUrl, duration, isFullyPreloaded]);
+  }, [videoSourceUrl, duration, isFullyPreloaded, isUsingLocalFile]);
 
   // Track Ended -> Host trigger auto next or pause if last track (Item 1)
   const handleEnded = useCallback(() => {
@@ -834,6 +843,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           onPlaying={onBufferingEnd}
           onEnded={handleEnded}
           onError={() => {
+            if (isUsingLocalFile) {
+              setLocalFallbackFailed(true);
+              return;
+            }
             setVideoError(
               'Не удалось загрузить видео. Браузер может не поддерживать кодек или файл поврежден.'
             );
@@ -1090,21 +1103,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <div
                 className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900/90 border border-neutral-700/60 text-[11px] font-mono"
                 title={
-                  isFullyPreloaded
+                  isUsingLocalFile
+                    ? 'Воспроизводится локально с вашего устройства (0% трафика сервера)'
+                    : isFullyPreloaded
                     ? 'Видео полностью сохранено в памяти браузера (0 сетевых запросов при просмотре)'
                     : bufferAheadSeconds > 0
                     ? `Нативный буфер браузера: +${Math.round(bufferAheadSeconds)} сек запаса (HTTP 206 стриминг)`
                     : 'Потоковое воспроизведение (HTTP 206)'
                 }
               >
-                <span className={isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                <span className={isUsingLocalFile || isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
                   ⚡
                 </span>
                 <span className="text-neutral-400">
-                  {isFullyPreloaded ? 'Кэш:' : 'Буфер:'}
+                  {isUsingLocalFile ? 'Локально:' : isFullyPreloaded ? 'Кэш:' : 'Буфер:'}
                 </span>
-                <span className={isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
-                  {isFullyPreloaded
+                <span className={isUsingLocalFile || isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
+                  {isUsingLocalFile || isFullyPreloaded
                     ? '100%'
                     : bufferAheadSeconds >= 60
                     ? `+${Math.floor(bufferAheadSeconds / 60)}:${Math.floor(bufferAheadSeconds % 60).toString().padStart(2, '0')}`
@@ -1182,10 +1197,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </form>
             )}
 
-            {/* Full Video Preload Button (Item 2: Загрузить всё видео сразу в память) */}
+            {/* Full Video Preload / Local Playback Badge */}
             {videoSourceUrl && (
               <>
-                {isFullyPreloaded ? (
+                {isUsingLocalFile ? (
+                  <div
+                    className="px-2 py-1 rounded-lg bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-medium flex items-center gap-1.5"
+                    title="Вы загрузили это видео — оно воспроизводится напрямую с вашего устройства без скачивания с сервера"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span className="hidden md:inline">Локально 100%</span>
+                  </div>
+                ) : isFullyPreloaded ? (
                   <div
                     className="px-2 py-1 rounded-lg bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-medium flex items-center gap-1.5"
                     title="Видео загружено целиком в локальную память браузера. Поток не докачивается при просмотре."

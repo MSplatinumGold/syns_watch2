@@ -80,6 +80,45 @@ export default function App() {
   const danmakuTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const emojiTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [localTrackUrls, setLocalTrackUrls] = useState<Record<string, string>>({});
+  const localTrackUrlsRef = useRef<Record<string, string>>({});
+
+  const registerLocalTrackUrl = useCallback((fileId: string, file: File) => {
+    if (!fileId || localTrackUrlsRef.current[fileId]) return;
+    const blobUrl = URL.createObjectURL(file);
+    localTrackUrlsRef.current = { ...localTrackUrlsRef.current, [fileId]: blobUrl };
+    setLocalTrackUrls((prev) => (prev[fileId] ? prev : { ...prev, [fileId]: blobUrl }));
+  }, []);
+
+  const revokeLocalTrackUrl = useCallback((fileId: string) => {
+    const existingUrl = localTrackUrlsRef.current[fileId];
+    if (!existingUrl) return;
+    URL.revokeObjectURL(existingUrl);
+    const nextRef = { ...localTrackUrlsRef.current };
+    delete nextRef[fileId];
+    localTrackUrlsRef.current = nextRef;
+    setLocalTrackUrls((prev) => {
+      if (!prev[fileId]) return prev;
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+  }, []);
+
+  const revokeAllLocalTrackUrls = useCallback(() => {
+    const urls = Object.values(localTrackUrlsRef.current);
+    if (urls.length === 0) return;
+    urls.forEach((url) => URL.revokeObjectURL(url));
+    localTrackUrlsRef.current = {};
+    setLocalTrackUrls({});
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      Object.values(localTrackUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+      localTrackUrlsRef.current = {};
+    };
+  }, []);
 
   const showAppNotice = useCallback((text: string, type: 'error' | 'info' = 'info') => {
     setAppNotice({ type, text });
@@ -671,8 +710,9 @@ export default function App() {
   };
 
   // Leave room flow
-  const handleLeaveRoom = () => {
+  const handleLeaveRoom = useCallback(() => {
     clearOverlayTimers();
+    revokeAllLocalTrackUrls();
     if (socketRef.current) {
       socketRef.current.disconnect();
     }
@@ -683,13 +723,13 @@ export default function App() {
     setFloatingEmojis([]);
     setRoomUploadProgress(null);
     window.history.pushState({}, '', window.location.pathname);
-  };
+  }, [clearOverlayTimers, revokeAllLocalTrackUrls]);
 
   // Close room flow (Host purges all room files and users immediately - Item 4)
   const handleCloseRoom = useCallback(() => {
     socketRef.current?.emit('host:close_room');
     handleLeaveRoom();
-  }, [clearOverlayTimers]);
+  }, [handleLeaveRoom]);
 
   // Switch tab and reset unread
   const handleSelectTab = (tab: 'chat' | 'playlist' | 'participants') => {
@@ -753,8 +793,9 @@ export default function App() {
   }, []);
 
   const handleDeleteTrack = useCallback((fileId: string) => {
+    revokeLocalTrackUrl(fileId);
     socketRef.current?.emit('host:delete_track', { fileId });
-  }, []);
+  }, [revokeLocalTrackUrl]);
 
   const handleTransferHost = useCallback((newHostUserId: string) => {
     socketRef.current?.emit('host:transfer_host', { newHostUserId });
@@ -972,6 +1013,7 @@ export default function App() {
           onChangeTrack={handleChangeTrack}
           onReorder={handleReorderPlaylist}
           onDeleteTrack={handleDeleteTrack}
+          onRegisterLocalTrackUrl={registerLocalTrackUrl}
           onBroadcastUploadProgress={handleEmitUploadProgress}
           onClearUploadProgress={handleClearUploadProgress}
         />
@@ -1045,6 +1087,7 @@ export default function App() {
         >
           <VideoPlayer
             currentTrack={currentTrack}
+            localTrackUrl={currentTrack ? localTrackUrls[currentTrack.id] : undefined}
             playlist={roomState?.playlist || []}
             currentTrackIndex={roomState?.currentTrackIndex || 0}
             isHost={isHost}
