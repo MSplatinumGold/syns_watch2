@@ -553,7 +553,15 @@ export const Navbar: React.FC<NavbarProps> = ({
                             <span className="text-xs font-bold text-white truncate">
                               {entry.version}
                             </span>
-                            <span className="px-1.5 py-0.2 rounded bg-rose-500/20 border border-rose-500/40 text-[9px] font-semibold text-rose-300 shrink-0">
+                            <span
+                              className={`px-1.5 py-0.2 rounded border text-[9px] font-semibold shrink-0 ${
+                                entry.tag === 'Release'
+                                  ? 'bg-rose-500/20 border-rose-500/40 text-rose-300'
+                                  : entry.tag === 'Beta'
+                                  ? 'bg-amber-500/15 border-amber-500/35 text-amber-300'
+                                  : 'bg-sky-500/15 border-sky-500/35 text-sky-300'
+                              }`}
+                            >
                               {entry.tag}
                             </span>
                           </div>
