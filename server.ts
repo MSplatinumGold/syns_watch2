@@ -2145,7 +2145,6 @@ async function startServer() {
   const isProduction = process.env.NODE_ENV === 'production';
 
   if (!isProduction) {
-    app.use('/stickers', express.static(path.join(__dirname, 'public', 'stickers'), { maxAge: '7d' }));
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -2159,20 +2158,8 @@ async function startServer() {
         `[WatchParty Server] ОШИБКА: Файл ${path.join(distPath, 'index.html')} не найден! Убедитесь, что в Build Command выполняется "npm run build".`
       );
     }
-    app.use('/assets', express.static(path.join(distPath, 'assets'), { maxAge: '30d', immutable: true }));
-    app.use('/stickers', express.static(path.join(distPath, 'stickers'), { maxAge: '7d' }));
-    app.use(
-      express.static(distPath, {
-        maxAge: 0,
-        setHeaders: (res, filePath) => {
-          if (filePath.endsWith('.html')) {
-            res.setHeader('Cache-Control', 'no-cache');
-          }
-        },
-      })
-    );
+    app.use(express.static(distPath));
     app.get('*', (_req, res) => {
-      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

@@ -1,5 +1,3 @@
-export type VoiceMode = 'text' | 'voice';
-
 export interface User {
   id: string;          // Socket.id
   nickname: string;
@@ -8,9 +6,6 @@ export interface User {
   isBuffering: boolean;
   joinedAt: number;
   currentTime?: number;
-  voiceMode?: VoiceMode;
-  isMicOn?: boolean;
-  isSpeaking?: boolean;
 }
 
 export interface PlaylistItem {
@@ -96,12 +91,6 @@ export interface FloatingEmojiItem {
   xPercent: number;
 }
 
-export interface VoiceSignalPayload {
-  type: 'offer' | 'answer' | 'ice-candidate';
-  sdp?: RTCSessionDescriptionInit;
-  candidate?: RTCIceCandidateInit;
-}
-
 export interface ClientToServerEvents {
   'room:join': (payload: { roomId: string; nickname: string; hostToken?: string }) => void;
   'user:change_nickname': (payload: { nickname: string }) => void;
@@ -131,8 +120,6 @@ export interface ClientToServerEvents {
     status: 'uploading' | 'retrying' | 'error' | 'completed';
   }) => void;
   'upload:clear': (payload: { fileId: string }) => void;
-  'voice:state': (payload: { mode: VoiceMode; isMicOn: boolean; isSpeaking: boolean }) => void;
-  'voice:signal': (payload: VoiceSignalPayload & { targetUserId: string }) => void;
 }
 
 export interface ServerToClientEvents {
@@ -157,14 +144,6 @@ export interface ServerToClientEvents {
   'chat:floating_emoji': (item: FloatingEmojiItem) => void;
   'chat:media_pruned': (payload: { deletedMediaIds: string[] }) => void;
   'upload:progress': (progress: RoomUploadProgress | null) => void;
-  'voice:user_state': (payload: {
-    userId: string;
-    mode: VoiceMode;
-    isMicOn: boolean;
-    isSpeaking: boolean;
-  }) => void;
-  'voice:signal': (payload: VoiceSignalPayload & { fromUserId: string }) => void;
   'room:closed': (payload: { reason: string }) => void;
   'error:notification': (payload: { message: string }) => void;
 }
-

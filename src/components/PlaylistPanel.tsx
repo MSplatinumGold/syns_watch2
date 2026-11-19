@@ -49,7 +49,6 @@ interface PlaylistPanelProps {
   onChangeTrack: (index: number) => void;
   onReorder: (newOrderIds: string[]) => void;
   onDeleteTrack: (fileId: string) => void;
-  onRegisterLocalTrackUrl?: (fileId: string, file: File) => void;
   onBroadcastUploadProgress?: (payload: {
     fileId: string;
     fileName: string;
@@ -69,7 +68,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   onChangeTrack,
   onReorder,
   onDeleteTrack,
-  onRegisterLocalTrackUrl,
   onBroadcastUploadProgress,
   onClearUploadProgress,
 }) => {
@@ -215,7 +213,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
             try {
               const resp = JSON.parse(xhr.responseText);
               if (resp.completed) {
-                onRegisterLocalTrackUrl?.(resp.item?.id || fileId, file);
                 emitRoomUploadProgress(fileId, file.name, 100, 'completed', true);
                 setUpload((prev) =>
                   prev
