@@ -98,6 +98,16 @@ export function useVoiceChat({
   const peerVolumesRef = useRef<Record<string, number>>(peerVolumes);
   peerVolumesRef.current = peerVolumes;
 
+  const hasRemoteVoice = Object.values(users).some(
+    (u) => u.id !== currentUserId && (u.voiceMode === 'voice' || u.isMicOn)
+  );
+  const isVoiceSessionActive = voiceMode === 'voice' || hasRemoteVoice;
+  const peerVoiceKey = Object.values(users)
+    .filter((u) => u.id && u.id !== currentUserId)
+    .map((u) => `${u.id}:${u.voiceMode === 'voice' || u.isMicOn ? 1 : 0}`)
+    .sort()
+    .join('|');
+
   const ensureAudioContext = useCallback(() => {
     if (typeof window === 'undefined') return null;
     const AudioCtx =
@@ -106,7 +116,7 @@ export function useVoiceChat({
     if (!AudioCtx) return null;
 
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
-      const ctx = new AudioCtx();
+      const ctx = new AudioCtx({ latencyHint: 'playback' });
       const master = ctx.createGain();
       const initialMaster = Math.max(0, Math.min(2, (voiceVolumeRef.current / 100) * voiceDuckRef.current));
       master.gain.value = initialMaster;
@@ -139,9 +149,10 @@ export function useVoiceChat({
     });
   }, [ensureAudioContext]);
 
-  // Global first-gesture unlock so incoming voice chat plays smoothly even before switching to voice tab
+  // Only unlock Web Audio / WebRTC playback when voice chat or debug test is active,
+  // avoiding mobile OS audio-pipeline hijacking during regular text+video watching.
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomId || (!isVoiceSessionActive && !isMicTestActive && !isPeerSimActive)) return;
     const handleGesture = () => {
       unlockVoiceAudio();
     };
@@ -151,7 +162,7 @@ export function useVoiceChat({
       window.removeEventListener('pointerdown', handleGesture);
       window.removeEventListener('keydown', handleGesture);
     };
-  }, [roomId, unlockVoiceAudio]);
+  }, [roomId, isVoiceSessionActive, isMicTestActive, isPeerSimActive, unlockVoiceAudio]);
 
   // Fetch STUN / optional TURN config from backend
   useEffect(() => {
@@ -406,12 +417,32 @@ export function useVoiceChat({
     [attachRemoteStream, socket]
   );
 
-  // Reconcile peer connections whenever the room participant list changes
+  // Reconcile peer connections lazily: only maintain WebRTC audio peers while someone in the room is in voice mode.
+  // When everyone is in text mode, tear down idle peers and AudioContext so mobile hardware video playback stays smooth.
   useEffect(() => {
     if (!roomId || !socket || !currentUserId) return;
 
+    if (!isVoiceSessionActive) {
+      for (const existingId of Array.from(peersRef.current.keys())) {
+        destroyPeer(existingId);
+      }
+      if (
+        !isMicTestActive &&
+        !isPeerSimActive &&
+        audioCtxRef.current &&
+        audioCtxRef.current.state !== 'closed'
+      ) {
+        audioCtxRef.current.close().catch(() => {});
+        audioCtxRef.current = null;
+        masterGainRef.current = null;
+      }
+      return;
+    }
+
     const activePeerIds = new Set(
-      Object.keys(users).filter((id) => id && id !== currentUserId)
+      peerVoiceKey
+        ? peerVoiceKey.split('|').map((entry) => entry.split(':')[0]).filter(Boolean)
+        : []
     );
 
     // Close removed peers
@@ -421,7 +452,7 @@ export function useVoiceChat({
       }
     }
 
-    // Create connections for new peers (deterministic initiator: lower socketId sends offer)
+    // Create connections for active room peers (deterministic initiator: lower socketId sends offer)
     activePeerIds.forEach((peerId) => {
       if (!peersRef.current.has(peerId)) {
         const entry = createPeerEntry(peerId);
@@ -442,7 +473,17 @@ export function useVoiceChat({
         }
       }
     });
-  }, [roomId, socket, currentUserId, users, createPeerEntry, destroyPeer]);
+  }, [
+    roomId,
+    socket,
+    currentUserId,
+    peerVoiceKey,
+    isVoiceSessionActive,
+    isMicTestActive,
+    isPeerSimActive,
+    createPeerEntry,
+    destroyPeer,
+  ]);
 
   // Listen for incoming WebRTC signaling packets
   useEffect(() => {

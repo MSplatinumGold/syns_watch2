@@ -32,9 +32,11 @@ import type {
 } from '../types/watchparty.ts';
 import { formatBytes, parseTime } from '../utils/format.ts';
 import { STICKER_PACKS } from '../utils/stickers.ts';
+import { compressChatImage } from '../utils/imageCompress.ts';
 import { StickerAsset } from './StickerAsset.tsx';
 
 const MAX_CHAT_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB limit per file
+const MAX_RAW_COMPRESSIBLE_IMAGE_BYTES = 35 * 1024 * 1024; // Allow up to 35 MB camera photos before client compression
 
 const CUTE_QUICK_ACTIONS = [
   { label: '💋 Поцеловать', word: 'поцеловать' },
@@ -129,6 +131,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [activeStickerPackId, setActiveStickerPackId] = useState<string>(STICKER_PACKS[0].id);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingCompressionInfo, setPendingCompressionInfo] = useState<{
+    originalSize: number;
+    compressedSize: number;
+  } | null>(null);
+  const [isCompressingImage, setIsCompressingImage] = useState(false);
   const [pendingPreviewUrl, setPendingPreviewUrl] = useState<string | null>(null);
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
@@ -218,16 +225,56 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     }
   }, [messages, currentUserId]);
 
-  const handleSelectMediaFile = (file: File | null) => {
+  const handleSelectMediaFile = async (file: File | null) => {
     setMediaError(null);
     if (!file) return;
 
     const isAllowed =
-      file.type.startsWith('image/') ||
+      (file.type.startsWith('image/') && file.type !== 'image/svg+xml') ||
       file.type.startsWith('video/') ||
       file.type.startsWith('audio/');
     if (!isAllowed) {
-      setMediaError('Поддерживаются только картинки, GIF, видео и аудио.');
+      setMediaError('Поддерживаются только картинки (PNG/JPG/GIF/WebP), видео и аудио.');
+      return;
+    }
+
+    const isCompressibleImage =
+      file.type.startsWith('image/') && file.type !== 'image/gif' && file.type !== 'image/svg+xml';
+
+    if (isCompressibleImage) {
+      if (file.size > MAX_RAW_COMPRESSIBLE_IMAGE_BYTES) {
+        setMediaError(
+          `Файл слишком большой (${formatBytes(file.size)}). Максимум — 35 МБ до сжатия.`
+        );
+        return;
+      }
+
+      setIsCompressingImage(true);
+      try {
+        const result = await compressChatImage(file, {
+          maxDimension: 1280,
+          quality: 0.8,
+        });
+
+        if (result.file.size > MAX_CHAT_MEDIA_BYTES) {
+          setMediaError(
+            `Даже после сжатия файл больше 10 МБ (${formatBytes(result.file.size)}).`
+          );
+          return;
+        }
+
+        setPendingFile(result.file);
+        setPendingCompressionInfo(
+          result.wasCompressed
+            ? {
+                originalSize: result.originalSize,
+                compressedSize: result.compressedSize,
+              }
+            : null
+        );
+      } finally {
+        setIsCompressingImage(false);
+      }
       return;
     }
 
@@ -238,6 +285,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       return;
     }
 
+    setPendingCompressionInfo(null);
     setPendingFile(file);
   };
 
@@ -291,6 +339,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const startEdit = (msg: ChatMessage) => {
     setReplyingTo(null);
     setPendingFile(null);
+    setPendingCompressionInfo(null);
     setMediaError(null);
     if (mediaInputRef.current) mediaInputRef.current.value = '';
     setEditingMessage(msg);
@@ -375,6 +424,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         }
 
         setPendingFile(null);
+        setPendingCompressionInfo(null);
         setText('');
         setReplyingTo(null);
         resetTextareaHeight();
@@ -1043,6 +1093,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           </div>
         )}
 
+        {/* Image Compression Progress */}
+        {isCompressingImage && (
+          <div className="px-2.5 py-1.5 rounded-xl bg-neutral-900 border border-neutral-700 text-neutral-300 text-[11px] flex items-center gap-2">
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400 shrink-0" />
+            <span>Сжимаем фото перед отправкой...</span>
+          </div>
+        )}
+
         {/* Pending Media Attachment Preview */}
         {pendingFile && (
           <div className="px-2.5 py-1.5 rounded-xl bg-neutral-900 border border-neutral-700 flex items-center justify-between gap-2">
@@ -1069,7 +1127,16 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               <div className="min-w-0">
                 <p className="text-xs text-white font-medium truncate">{pendingFile.name}</p>
                 <p className="text-[10px] text-neutral-400 font-mono">
-                  {formatBytes(pendingFile.size)} / 10 МБ макс.
+                  {pendingCompressionInfo ? (
+                    <>
+                      <span className="text-emerald-400 font-semibold">
+                        Сжато: {formatBytes(pendingCompressionInfo.originalSize)} →{' '}
+                        {formatBytes(pendingCompressionInfo.compressedSize)}
+                      </span>
+                    </>
+                  ) : (
+                    `${formatBytes(pendingFile.size)} / 10 МБ макс.`
+                  )}
                 </p>
               </div>
             </div>
@@ -1078,6 +1145,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               disabled={isUploadingMedia}
               onClick={() => {
                 setPendingFile(null);
+                setPendingCompressionInfo(null);
                 if (mediaInputRef.current) mediaInputRef.current.value = '';
               }}
               className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer disabled:opacity-40"
@@ -1248,7 +1316,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           <div className="flex items-end gap-1.5 sm:gap-2">
             <button
               type="button"
-              disabled={isUploadingMedia || Boolean(editingMessage)}
+              disabled={isUploadingMedia || isCompressingImage || Boolean(editingMessage)}
               onClick={() => mediaInputRef.current?.click()}
               className={`p-2 rounded-xl border transition cursor-pointer shrink-0 disabled:opacity-40 ${
                 pendingFile
@@ -1343,6 +1411,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               onClick={() => submitMessage()}
               disabled={
                 isUploadingMedia ||
+                isCompressingImage ||
                 (editingMessage
                   ? !text.trim() && !(editingMessage.media && !editingMessage.media.expired)
                   : !text.trim() && !pendingFile)

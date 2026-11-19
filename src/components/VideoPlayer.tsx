@@ -41,6 +41,7 @@ interface VideoPlayerProps {
   isTheaterMode?: boolean;
   clockOffsetMs?: number;
   videoDuckMultiplier?: number;
+  localBlobUrl?: string;
   onPlay: (currentTime: number) => void;
   onPause: (currentTime: number) => void;
   onSeek: (targetTime: number) => void;
@@ -65,6 +66,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   isTheaterMode,
   clockOffsetMs = 0,
   videoDuckMultiplier = 1,
+  localBlobUrl,
   onPlay,
   onPause,
   onSeek,
@@ -111,6 +113,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [preloadProgress, setPreloadProgress] = useState<number | null>(null);
   const [isFullyPreloaded, setIsFullyPreloaded] = useState(false);
   const [preloadedBlobUrl, setPreloadedBlobUrl] = useState<string | null>(null);
+  const [localSourceFailed, setLocalSourceFailed] = useState(false);
   const [bufferAheadSeconds, setBufferAheadSeconds] = useState(0);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const preloadControllerRef = useRef<AbortController | null>(null);
@@ -133,6 +136,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const clockOffsetRef = useRef(clockOffsetMs);
   clockOffsetRef.current = clockOffsetMs;
   const lastHardSeekAtRef = useRef(0);
+  const bufferingDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isTouchDeviceRef = useRef(
+    typeof window !== 'undefined' &&
+      (window.matchMedia?.('(pointer: coarse)')?.matches || (navigator.maxTouchPoints ?? 0) > 0)
+  );
 
   const getServerNow = useCallback(() => Date.now() + clockOffsetRef.current, []);
 
@@ -192,8 +200,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [playbackState.currentTime, playbackState.lastUpdatedServerTime]);
 
-  // Video source handling: prioritizes local preloaded blob if available, else network stream URL
-  const videoSourceUrl = preloadedBlobUrl || currentTrack?.url;
+  // Video source handling: prioritizes uploader's local disk File URL (0 server egress),
+  // then preloaded blob, else network HTTP 206 stream URL
+  const isLocalSource = Boolean(localBlobUrl && !localSourceFailed);
+  const videoSourceUrl = isLocalSource ? localBlobUrl : preloadedBlobUrl || currentTrack?.url;
 
   // Cleanup preloaded blob, abort controller, and timers on unmount
   useEffect(() => {
@@ -209,6 +219,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       if (controlsTimeoutRef.current) {
         clearTimeout(controlsTimeoutRef.current);
         controlsTimeoutRef.current = null;
+      }
+      if (bufferingDebounceRef.current) {
+        clearTimeout(bufferingDebounceRef.current);
+        bufferingDebounceRef.current = null;
       }
     };
   }, []);
@@ -239,6 +253,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       videoRef.current.currentTime = 0;
     }
   }, [currentTrack?.id, currentTrackIndex, getServerNow]);
+
+  useEffect(() => {
+    setLocalSourceFailed(false);
+  }, [currentTrack?.id, localBlobUrl]);
 
   // Handler to preload full video in advance into browser memory (Item 2)
   const handlePreloadFullVideo = async () => {
@@ -358,10 +376,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [isHost, currentTrackIndex, playlist.length, duration, onTrackEnded, onPause]);
 
-  // Smart buffer margin check (Item 2: avoid micro-stalls if healthy buffer margin is present)
+  const clearBufferingDebounce = useCallback(() => {
+    if (bufferingDebounceRef.current) {
+      clearTimeout(bufferingDebounceRef.current);
+      bufferingDebounceRef.current = null;
+    }
+  }, []);
+
+  const handleVideoReady = useCallback(() => {
+    clearBufferingDebounce();
+    onBufferingEnd();
+  }, [clearBufferingDebounce, onBufferingEnd]);
+
+  // Smart buffer margin check (debounced so brief mobile keyframe/network hiccups never stutter-pause the room)
   const handleBufferingCheck = useCallback(() => {
     const video = videoRef.current;
-    if (!video || !video.duration) return;
+    if (!video || !video.duration || video.seeking || video.paused || !isPlayingRef.current) {
+      return;
+    }
+    if (video.readyState >= 3) return;
+
     let bufferAhead = 0;
     const cur = video.currentTime;
     for (let i = 0; i < video.buffered.length; i++) {
@@ -370,13 +404,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         break;
       }
     }
-    // Only pause if buffer ahead is genuinely starved (< 0.5s)
-    if (bufferAhead < 0.5) {
-      onBufferingStart();
+
+    if (bufferAhead < 0.35 && !bufferingDebounceRef.current) {
+      bufferingDebounceRef.current = setTimeout(() => {
+        bufferingDebounceRef.current = null;
+        const v = videoRef.current;
+        if (!v || v.seeking || v.paused || !isPlayingRef.current || v.readyState >= 3) return;
+        onBufferingStart();
+      }, 700);
     }
   }, [onBufferingStart]);
 
-  // Sync bus drift correction loop (spec 4.1 & item 7: 1.05x / 0.95x smooth adjustment)
+  // Sync bus drift correction loop (relaxed deadband & avoids playbackRate resampling on mobile hardware decoders)
   useEffect(() => {
     const interval = setInterval(() => {
       const video = videoRef.current;
@@ -392,6 +431,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         }
         setAutoplayBlocked(false);
         if (playbackRateRef.current !== 1.0) {
+          video.playbackRate = 1.0;
           playbackRateRef.current = 1.0;
           setPlaybackRate(1.0);
         }
@@ -403,7 +443,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         safePlay(video);
       }
 
-      // Calculate expected time using clock-offset-corrected server time (fixes PC clock skew 0.0-1.0s loop)
+      // Calculate expected time using clock-offset-corrected server time
       const elapsedSinceServerUpdate = Math.max(
         0,
         (getServerNow() - syncAnchorRef.current.serverTimestamp) / 1000
@@ -411,29 +451,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const expectedTime = Math.max(0, syncAnchorRef.current.currentTime + elapsedSinceServerUpdate);
       const delta = Math.abs(video.currentTime - expectedTime);
 
-      // Hard jump if lag/drift is high (> 1.5s) with 1.2s cooldown so slow decoders don't stutter-loop
-      if (delta > 1.5) {
+      // Hard jump only on significant drift (> 2.0s) with 2.5s cooldown
+      if (delta > 2.0) {
         const now = Date.now();
-        if (now - lastHardSeekAtRef.current > 1200) {
+        if (now - lastHardSeekAtRef.current > 2500) {
           lastHardSeekAtRef.current = now;
           video.currentTime = expectedTime;
         }
-        video.playbackRate = 1.0;
-        if (playbackRateRef.current !== 1.0) {
+        if (video.playbackRate !== 1.0 || playbackRateRef.current !== 1.0) {
+          video.playbackRate = 1.0;
           playbackRateRef.current = 1.0;
           setPlaybackRate(1.0);
         }
       }
-      // Smooth catch-up / slow-down if slightly drifted (0.15s - 1.5s)
-      else if (delta > 0.15) {
+      // On desktop, gently catch up / slow down if drifted (0.45s - 2.0s).
+      // On mobile/touch devices, keep playbackRate strictly 1.0 to avoid audio/video hardware decoder stutter.
+      else if (!isTouchDeviceRef.current && delta > 0.45) {
         const rate = video.currentTime < expectedTime ? 1.05 : 0.95;
-        video.playbackRate = rate;
+        if (video.playbackRate !== rate) {
+          video.playbackRate = rate;
+        }
         if (playbackRateRef.current !== rate) {
           playbackRateRef.current = rate;
           setPlaybackRate(rate);
         }
       }
-      // Perfectly in sync (<= 0.15s)
+      // In sync
       else {
         if (video.playbackRate !== 1.0 || playbackRateRef.current !== 1.0) {
           video.playbackRate = 1.0;
@@ -441,7 +484,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           setPlaybackRate(1.0);
         }
       }
-    }, 350);
+    }, 750);
 
     return () => clearInterval(interval);
   }, [playbackState, videoSourceUrl, autoplayBlocked, getServerNow, safePlay]);
@@ -595,7 +638,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     video.muted = isMuted || target === 0;
 
     const start = video.volume;
-    if (Math.abs(start - target) < 0.01) {
+    if (Math.abs(start - target) < 0.02 || videoDuckMultiplier === 1) {
       video.volume = target;
       return;
     }
@@ -839,7 +882,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       <div
         ref={containerRef}
         onMouseMove={handleMouseMove}
-        className="relative bg-neutral-950 rounded-2xl overflow-hidden shadow-2xl flex flex-col justify-center items-center select-none group border border-neutral-800 shrink-0 transition-[width,height] duration-150"
+        className="relative bg-neutral-950 rounded-2xl overflow-hidden shadow-2xl flex flex-col justify-center items-center select-none group border border-neutral-800 shrink-0"
         style={
           isFullscreen
             ? { width: '100vw', height: '100vh', borderRadius: 0 }
@@ -868,10 +911,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           onLoadedMetadata={handleLoadedMetadata}
           onWaiting={handleBufferingCheck}
           onStalled={handleBufferingCheck}
-          onCanPlay={onBufferingEnd}
-          onPlaying={onBufferingEnd}
+          onCanPlay={handleVideoReady}
+          onPlaying={handleVideoReady}
           onEnded={handleEnded}
           onError={() => {
+            if (isLocalSource) {
+              setLocalSourceFailed(true);
+              setVideoError(null);
+              return;
+            }
             setVideoError(
               'Не удалось загрузить видео. Браузер может не поддерживать кодек или файл поврежден.'
             );
@@ -1123,26 +1171,30 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <span>{formatTime(duration)}</span>
             </div>
 
-            {/* Native Buffer / Cache Indicator */}
+            {/* Native Buffer / Cache / Local Indicator */}
             {videoSourceUrl && duration > 0 && (
               <div
                 className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900/90 border border-neutral-700/60 text-[11px] font-mono"
                 title={
-                  isFullyPreloaded
+                  isLocalSource
+                    ? 'Воспроизведение с вашего устройства (0 байт серверного трафика)'
+                    : isFullyPreloaded
                     ? 'Видео полностью сохранено в памяти браузера (0 сетевых запросов при просмотре)'
                     : bufferAheadSeconds > 0
                     ? `Нативный буфер браузера: +${Math.round(bufferAheadSeconds)} сек запаса (HTTP 206 стриминг)`
                     : 'Потоковое воспроизведение (HTTP 206)'
                 }
               >
-                <span className={isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                <span className={isLocalSource || isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
                   ⚡
                 </span>
                 <span className="text-neutral-400">
-                  {isFullyPreloaded ? 'Кэш:' : 'Буфер:'}
+                  {isLocalSource ? 'Локально:' : isFullyPreloaded ? 'Кэш:' : 'Буфер:'}
                 </span>
-                <span className={isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
-                  {isFullyPreloaded
+                <span className={isLocalSource || isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
+                  {isLocalSource
+                    ? '0 трафика'
+                    : isFullyPreloaded
                     ? '100%'
                     : bufferAheadSeconds >= 60
                     ? `+${Math.floor(bufferAheadSeconds / 60)}:${Math.floor(bufferAheadSeconds % 60).toString().padStart(2, '0')}`
@@ -1220,8 +1272,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </form>
             )}
 
-            {/* Full Video Preload Button (Item 2: Загрузить всё видео сразу в память) */}
-            {videoSourceUrl && (
+            {/* Full Video Preload Button (hidden when playing straight from uploader's local disk) */}
+            {videoSourceUrl && !isLocalSource && (
               <>
                 {isFullyPreloaded ? (
                   <div

@@ -55,6 +55,10 @@ export default function App() {
   const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
   const [bufferingUsers, setBufferingUsers] = useState<string[]>([]);
   const [roomUploadProgress, setRoomUploadProgress] = useState<RoomUploadProgress | null>(null);
+  const [localTrackBlobUrls, setLocalTrackBlobUrls] = useState<Record<string, string>>({});
+  const localTrackBlobUrlsRef = useRef<Record<string, string>>({});
+  localTrackBlobUrlsRef.current = localTrackBlobUrls;
+  const seenPlaylistIdsRef = useRef<Set<string>>(new Set());
 
   const [socketInstance, setSocketInstance] = useState<Socket<
     ServerToClientEvents,
@@ -75,6 +79,8 @@ export default function App() {
   const [isTablet, setIsTablet] = useState(false);
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [clockOffsetMs, setClockOffsetMs] = useState(0);
+  const clockOffsetMsRef = useRef(0);
+  clockOffsetMsRef.current = clockOffsetMs;
   const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
   const [customViewportHeight, setCustomViewportHeight] = useState<number | null>(null);
   const [portraitVideoPercent, setPortraitVideoPercent] = useState<number>(30);
@@ -287,7 +293,9 @@ export default function App() {
           bestClockRttRef.current = rtt;
         }
         const estimatedServerNow = serverTime + rtt / 2;
-        setClockOffsetMs(Math.round(estimatedServerNow - receivedAt));
+        const offset = Math.round(estimatedServerNow - receivedAt);
+        clockOffsetMsRef.current = offset;
+        setClockOffsetMs(offset);
       }
     });
 
@@ -420,7 +428,7 @@ export default function App() {
             ...prev.playbackState,
             isPlaying: false,
             currentTime,
-            lastUpdatedServerTime: Date.now(),
+            lastUpdatedServerTime: Date.now() + clockOffsetMsRef.current,
           },
         };
       });
@@ -435,7 +443,7 @@ export default function App() {
           playbackState: {
             ...prev.playbackState,
             currentTime: targetTime,
-            lastUpdatedServerTime: Date.now(),
+            lastUpdatedServerTime: Date.now() + clockOffsetMsRef.current,
           },
         };
       });
@@ -702,9 +710,76 @@ export default function App() {
     window.history.pushState({}, '', `?room=${rId}`);
   };
 
+  const handleRegisterLocalFile = useCallback((fileId: string, file: File) => {
+    setLocalTrackBlobUrls((prev) => {
+      if (prev[fileId]) return prev;
+      const objUrl = URL.createObjectURL(file);
+      return { ...prev, [fileId]: objUrl };
+    });
+  }, []);
+
+  const handleUnregisterLocalFile = useCallback((fileId: string) => {
+    setLocalTrackBlobUrls((prev) => {
+      const existing = prev[fileId];
+      if (!existing) return prev;
+      URL.revokeObjectURL(existing);
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+  }, []);
+
+  const clearAllLocalFiles = useCallback(() => {
+    Object.values(localTrackBlobUrlsRef.current).forEach((url) => {
+      URL.revokeObjectURL(url);
+    });
+    seenPlaylistIdsRef.current.clear();
+    setLocalTrackBlobUrls({});
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      Object.values(localTrackBlobUrlsRef.current).forEach((url) => {
+        URL.revokeObjectURL(url);
+      });
+    };
+  }, []);
+
+  // Revoke local blob URLs once a previously seen track is deleted from playlist
+  useEffect(() => {
+    const playlist = roomState?.playlist;
+    if (!playlist) return;
+    const currentIds = new Set(playlist.map((item) => item.id));
+    playlist.forEach((item) => seenPlaylistIdsRef.current.add(item.id));
+
+    const idsToRevoke: string[] = [];
+    seenPlaylistIdsRef.current.forEach((seenId) => {
+      if (!currentIds.has(seenId)) {
+        seenPlaylistIdsRef.current.delete(seenId);
+        if (localTrackBlobUrlsRef.current[seenId]) {
+          idsToRevoke.push(seenId);
+        }
+      }
+    });
+
+    if (idsToRevoke.length > 0) {
+      setLocalTrackBlobUrls((prev) => {
+        const next = { ...prev };
+        idsToRevoke.forEach((id) => {
+          if (next[id]) {
+            URL.revokeObjectURL(next[id]);
+            delete next[id];
+          }
+        });
+        return next;
+      });
+    }
+  }, [roomState?.playlist]);
+
   // Leave room flow
   const handleLeaveRoom = () => {
     clearOverlayTimers();
+    clearAllLocalFiles();
     if (socketRef.current) {
       socketRef.current.disconnect();
     }
@@ -1080,6 +1155,9 @@ export default function App() {
           roomId={roomId}
           hostToken={hostToken}
           socketId={socketId}
+          localTrackBlobUrls={localTrackBlobUrls}
+          onRegisterLocalFile={handleRegisterLocalFile}
+          onUnregisterLocalFile={handleUnregisterLocalFile}
           onChangeTrack={handleChangeTrack}
           onReorder={handleReorderPlaylist}
           onDeleteTrack={handleDeleteTrack}
@@ -1184,6 +1262,7 @@ export default function App() {
             isHost={isHost}
             clockOffsetMs={clockOffsetMs}
             videoDuckMultiplier={videoDuckMultiplier}
+            localBlobUrl={currentTrack ? localTrackBlobUrls[currentTrack.id] : undefined}
             playbackState={
               roomState?.playbackState || {
                 isPlaying: false,

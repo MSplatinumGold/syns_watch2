@@ -1289,7 +1289,7 @@ app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
       'Accept-Ranges': 'bytes',
       'Content-Length': chunksize,
       'Content-Type': mimeType,
-      'Cache-Control': 'public, max-age=86400, no-transform',
+      'Cache-Control': 'private, no-cache, no-transform',
     });
 
     req.on('close', () => fileStream.destroy());
@@ -1299,7 +1299,7 @@ app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
       'Content-Length': fileSize,
       'Content-Type': mimeType,
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'public, max-age=86400, no-transform',
+      'Cache-Control': 'private, no-cache, no-transform',
     });
     const fileStream = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
     req.on('close', () => fileStream.destroy());
@@ -1374,7 +1374,7 @@ app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
       'Accept-Ranges': 'bytes',
       'Content-Length': chunksize,
       'Content-Type': mimeType,
-      'Cache-Control': 'public, max-age=86400, no-transform',
+      'Cache-Control': 'private, no-cache, no-transform',
       'X-Content-Type-Options': 'nosniff',
     });
 
@@ -1389,7 +1389,7 @@ app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
       'Content-Length': fileSize,
       'Content-Type': mimeType,
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'public, max-age=86400, no-transform',
+      'Cache-Control': 'private, no-cache, no-transform',
     });
 
     const fileStream = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
@@ -2235,8 +2235,17 @@ async function startServer() {
         `[WatchParty Server] ОШИБКА: Файл ${path.join(distPath, 'index.html')} не найден! Убедитесь, что в Build Command выполняется "npm run build".`
       );
     }
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        etag: true,
+        lastModified: true,
+        setHeaders: (res) => {
+          res.setHeader('Cache-Control', 'no-cache');
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

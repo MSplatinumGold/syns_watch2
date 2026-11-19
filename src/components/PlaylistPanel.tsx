@@ -46,6 +46,9 @@ interface PlaylistPanelProps {
   roomId: string;
   hostToken: string;
   socketId: string;
+  localTrackBlobUrls?: Record<string, string>;
+  onRegisterLocalFile?: (fileId: string, file: File) => void;
+  onUnregisterLocalFile?: (fileId: string) => void;
   onChangeTrack: (index: number) => void;
   onReorder: (newOrderIds: string[]) => void;
   onDeleteTrack: (fileId: string) => void;
@@ -65,6 +68,9 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   roomId,
   hostToken,
   socketId,
+  localTrackBlobUrls = {},
+  onRegisterLocalFile,
+  onUnregisterLocalFile,
   onChangeTrack,
   onReorder,
   onDeleteTrack,
@@ -360,6 +366,10 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       const fileId = Math.random().toString(36).substring(2, 10) + '_' + Date.now();
       const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
 
+      // Register local file immediately so when server broadcasts playlist:updated,
+      // the uploader's browser plays straight from local disk (0 egress from Render).
+      onRegisterLocalFile?.(fileId, file);
+
       isCancelledRef.current = false;
       completedChunksSetRef.current.clear();
       chunkLoadedMapRef.current.clear();
@@ -382,7 +392,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       const allChunks = Array.from({ length: totalChunks }, (_, i) => i);
       uploadChunkLoop(file, fileId, allChunks);
     },
-    [emitRoomUploadProgress, uploadChunkLoop]
+    [emitRoomUploadProgress, uploadChunkLoop, onRegisterLocalFile]
   );
 
   startUploadForFileRef.current = startUploadForFile;
@@ -464,6 +474,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     setUpload(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (currentFileId) {
+      onUnregisterLocalFile?.(currentFileId);
       onClearUploadProgress?.(currentFileId);
     }
 
@@ -729,9 +740,19 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                     >
                       {item.originalName}
                     </p>
-                    <p className="text-[10px] text-neutral-500 font-mono mt-0.5">
-                      {formatBytes(item.size)}
-                    </p>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <span className="text-[10px] text-neutral-500 font-mono">
+                        {formatBytes(item.size)}
+                      </span>
+                      {Boolean(localTrackBlobUrls[item.id]) && (
+                        <span
+                          className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300"
+                          title="Воспроизводится с вашего устройства без расхода трафика сервера"
+                        >
+                          Локально
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
 
