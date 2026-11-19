@@ -23,12 +23,14 @@ import { ChatPanel } from './components/ChatPanel.tsx';
 import { PlaylistPanel } from './components/PlaylistPanel.tsx';
 import { ParticipantsPanel } from './components/ParticipantsPanel.tsx';
 import { JoinModal } from './components/JoinModal.tsx';
+import { SiteMechanicsModal } from './components/SiteMechanicsModal.tsx';
 import {
   clearAllSessionMediaCaches,
   registerLocalTrackFile,
   revokeLocalTrackUrl,
 } from './utils/mediaCache.ts';
 import { applyUiTheme, getSavedUiTheme, type UiThemeId } from './utils/themes.ts';
+import type { MechanicsTabId } from './utils/mechanics.ts';
 import {
   MessageSquare,
   Film,
@@ -68,6 +70,10 @@ export default function App() {
     } catch {
       return true;
     }
+  });
+  const [mechanicsModal, setMechanicsModal] = useState<{ open: boolean; tab: MechanicsTabId }>({
+    open: false,
+    tab: 'player',
   });
 
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
@@ -591,8 +597,9 @@ export default function App() {
         });
       }
 
-      // Trigger Danmaku item on 4 dedicated bottom lanes to prevent text collisions
+      // Trigger Danmaku item on 4 dedicated bottom lanes to prevent text collisions (mask spoilers)
       if ((message.type === 'message' || message.type === 'action') && message.text) {
+        const maskedDanmakuText = message.text.replace(/\|\|[\s\S]+?\|\|/g, '[спойлер]');
         const lanes = [69, 75, 81, 87];
         const now = Date.now();
         let chosenIdx = -1;
@@ -611,6 +618,7 @@ export default function App() {
 
         const danmaku: DanmakuItem = {
           ...message,
+          text: maskedDanmakuText,
           topPercent: lanes[chosenIdx],
         };
         setDanmakuItems((prev) => [...prev, danmaku]);
@@ -648,8 +656,11 @@ export default function App() {
           return m;
         })
       );
+      const maskedDanmakuText = text.replace(/\|\|[\s\S]+?\|\|/g, '[спойлер]');
       setDanmakuItems((prev) =>
-        prev.map((item) => (item.id === messageId ? { ...item, text, editedAt } : item))
+        prev.map((item) =>
+          item.id === messageId ? { ...item, text: maskedDanmakuText, editedAt } : item
+        )
       );
     });
 
@@ -657,6 +668,16 @@ export default function App() {
     socket.on('chat:deleted', ({ messageId }) => {
       setMessages((prev) => prev.filter((m) => m.id !== messageId));
       setDanmakuItems((prev) => prev.filter((item) => item.id !== messageId));
+    });
+
+    // Ready Check updates ("Все на месте? 🍿")
+    socket.on('room:ready_check_updated', (readyCheck) => {
+      setRoomState((prev) => (prev ? { ...prev, readyCheck } : prev));
+    });
+
+    // Pinned host message updates
+    socket.on('chat:pinned_updated', (pinnedMessage) => {
+      setRoomState((prev) => (prev ? { ...prev, pinnedMessage } : prev));
     });
 
     // Room-wide video upload progress badge
@@ -966,6 +987,37 @@ export default function App() {
     socketRef.current?.emit('user:set_prefix', { targetUserId, prefix });
   }, []);
 
+  const handleStartReadyCheck = useCallback(() => {
+    socketRef.current?.emit('host:start_ready_check');
+  }, []);
+
+  const handleCancelReadyCheck = useCallback(() => {
+    socketRef.current?.emit('host:cancel_ready_check');
+  }, []);
+
+  const handleConfirmReady = useCallback(() => {
+    socketRef.current?.emit('client:ready_confirm');
+  }, []);
+
+  const handlePinMessage = useCallback((msg: ChatMessage) => {
+    socketRef.current?.emit('host:pin_message', {
+      messageId: msg.id,
+      text: msg.text,
+      nickname: msg.nickname,
+      hasMedia: Boolean(msg.media),
+      mediaKind: msg.media?.mediaKind,
+      isSticker: Boolean(msg.stickerId),
+    });
+  }, []);
+
+  const handleUnpinMessage = useCallback(() => {
+    socketRef.current?.emit('host:unpin_message');
+  }, []);
+
+  const handleOpenMechanics = useCallback((tab: MechanicsTabId = 'player') => {
+    setMechanicsModal({ open: true, tab });
+  }, []);
+
   const NoticeBanner = appNotice ? (
     <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] max-w-md w-[calc(100%-2rem)]">
       <div
@@ -1085,13 +1137,17 @@ export default function App() {
           isKeyboardOpen={isKeyboardOpen}
           typingNicknames={Object.values(typingUsers)}
           roomUploadProgress={roomUploadProgress}
+          pinnedMessage={roomState?.pinnedMessage || null}
           onSendMessage={handleSendMessage}
           onEditMessage={handleEditMessage}
           onDeleteMessage={handleDeleteMessage}
+          onPinMessage={handlePinMessage}
+          onUnpinMessage={handleUnpinMessage}
           onTypingChange={handleTypingChange}
           onSendFloatingEmoji={handleSendFloatingEmoji}
           onSeekToTimecode={handleSeek}
           onLocalMediaMessageSent={handleLocalMediaMessageSent}
+          onOpenMechanics={handleOpenMechanics}
         />
       </div>
 
@@ -1124,6 +1180,8 @@ export default function App() {
           hostCurrentTime={roomState?.playbackState.currentTime || 0}
           onTransferHost={handleTransferHost}
           onSetUserPrefix={handleSetUserPrefix}
+          onStartReadyCheck={handleStartReadyCheck}
+          isReadyCheckActive={Boolean(roomState?.readyCheck)}
         />
       </div>
     </div>
@@ -1150,6 +1208,7 @@ export default function App() {
         onChangeNickname={handleChangeNickname}
         onLeaveRoom={handleLeaveRoom}
         onCloseRoom={handleCloseRoom}
+        onOpenMechanics={handleOpenMechanics}
       />
 
       {/* 2. Unified Orientation Layout: VideoPlayer & Sidebar stay mounted across orientation/theater switches */}
@@ -1204,6 +1263,9 @@ export default function App() {
             floatingEmojis={floatingEmojis}
             isTheaterMode={isPortraitMode ? undefined : isTheaterMode}
             ambilightEnabled={ambilightEnabled}
+            readyCheck={roomState?.readyCheck || null}
+            users={roomState?.users || {}}
+            currentUserId={socketId}
             onPlay={handlePlay}
             onPause={handlePause}
             onSeek={handleSeek}
@@ -1214,6 +1276,9 @@ export default function App() {
             onProgressReport={handleProgressReport}
             onTriggerUpload={() => setActiveTab('playlist')}
             onToggleTheater={isPortraitMode ? undefined : () => setIsTheaterMode((prev) => !prev)}
+            onStartReadyCheck={handleStartReadyCheck}
+            onCancelReadyCheck={handleCancelReadyCheck}
+            onConfirmReady={handleConfirmReady}
           />
         </section>
 
@@ -1292,6 +1357,12 @@ export default function App() {
           {TabContent}
         </aside>
       </main>
+
+      <SiteMechanicsModal
+        isOpen={mechanicsModal.open}
+        initialTab={mechanicsModal.tab}
+        onClose={() => setMechanicsModal((prev) => ({ ...prev, open: false }))}
+      />
     </div>
   );
 }

@@ -34,6 +34,8 @@ interface ParticipantsPanelProps {
   onChangePeerVolume?: (peerId: string, volume: number) => void;
   onTransferHost: (newHostUserId: string) => void;
   onSetUserPrefix: (targetUserId: string, prefix: string) => void;
+  onStartReadyCheck?: () => void;
+  isReadyCheckActive?: boolean;
 }
 
 export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
@@ -52,6 +54,8 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
   onChangePeerVolume,
   onTransferHost,
   onSetUserPrefix,
+  onStartReadyCheck,
+  isReadyCheckActive = false,
 }) => {
   const [copied, setCopied] = useState(false);
   const [editingPrefixUserId, setEditingPrefixUserId] = useState<string | null>(null);
@@ -93,23 +97,41 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
           </span>
         </div>
 
-        <button
-          onClick={handleCopyLink}
-          className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition border border-neutral-700/60 cursor-pointer"
-          title="Скопировать ссылку для приглашения"
-        >
-          {copied ? (
-            <>
-              <Check className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="text-emerald-400">Скопировано!</span>
-            </>
-          ) : (
-            <>
-              <Share2 className="w-3.5 h-3.5" />
-              <span>Пригласить</span>
-            </>
+        <div className="flex items-center gap-1.5">
+          {isHost && onStartReadyCheck && (
+            <button
+              type="button"
+              onClick={onStartReadyCheck}
+              className={`px-2 py-1 rounded-lg text-xs font-medium flex items-center gap-1 transition border cursor-pointer ${
+                isReadyCheckActive
+                  ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                  : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-amber-300 border-neutral-700/60'
+              }`}
+              title="Запустить проверку готовности «Все на месте? 🍿»"
+            >
+              <span>🍿</span>
+              <span className="hidden sm:inline">Готовность</span>
+            </button>
           )}
-        </button>
+
+          <button
+            onClick={handleCopyLink}
+            className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition border border-neutral-700/60 cursor-pointer"
+            title="Скопировать ссылку для приглашения"
+          >
+            {copied ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="text-emerald-400">Скопировано!</span>
+              </>
+            ) : (
+              <>
+                <Share2 className="w-3.5 h-3.5" />
+                <span>Пригласить</span>
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Users List */}

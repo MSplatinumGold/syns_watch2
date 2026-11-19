@@ -19,8 +19,17 @@ import {
   UploadCloud,
   CheckCircle2,
   ChevronDown,
+  Pin,
+  PinOff,
 } from 'lucide-react';
-import type { ChatMessage, ChatReplyRef, RoomUploadProgress, User } from '../types/watchparty.ts';
+import type {
+  ChatMessage,
+  ChatReplyRef,
+  PinnedChatMessage,
+  RoomUploadProgress,
+  User,
+} from '../types/watchparty.ts';
+import type { MechanicsTabId } from '../utils/mechanics.ts';
 import { formatBytes, parseTime } from '../utils/format.ts';
 import { STICKER_PACKS } from '../utils/stickers.ts';
 import {
@@ -83,27 +92,47 @@ const CUTE_QUICK_ACTIONS = [
   { label: '❤️ Люблю', word: 'люблю' },
 ];
 
-const RP_ACTIONS_GROUPS = [
-  { emoji: '💋', words: 'поцеловать, поцелуй, чмок, чмокнуть, воздушный поцелуй', example: 'поцеловать в щеку' },
-  { emoji: '🫂', words: 'обнять, обними, обнимаю, обнимашки, прижать, прижми' },
-  { emoji: '🥹', words: 'погладить, погладь, глажу, приласкать, потрепать' },
-  { emoji: '🧣', words: 'укрыть, укрой  •  🐱 почесать, почеши  •  💆 массаж, помассировать', example: 'почесать за ушком' },
-  { emoji: '🤝', words: 'взять за руку, держать за руку, пожать руку, жму руку' },
-  { emoji: '🤭', words: 'пощекотать, щекотать, щекотка  •  🤏 ущипнуть, щипнуть' },
-  { emoji: '👉', words: 'ткнуть, тык  •  👃 буп, понюхать  •  😴 убаюкать' },
-  { emoji: '🐾', words: 'утащить  •  🫣 спрятать  •  🛋️ закидать  •  😂 рассмешить', example: 'закидать подушками' },
-  { emoji: '💥', words: 'ударить, стукнуть, треснуть, бонк  •  🦶 пнуть, пинок  •  👋 шлепнуть' },
-  { emoji: '🦷', words: 'укусить, кусь, куснуть  •  👅 лизнуть, лизь', example: 'укусить за ушко' },
-  { emoji: '🍿', words: 'покормить, покорми  •  🍪 угостить, угости  •  ☕ напоить, чай, налить, насыпать', example: 'налить какао' },
-  { emoji: '🎁', words: 'дать, дай, передать, отдать, вручить, подарить, подарить цветы, принести, купить', example: 'дать печеньку' },
-  { emoji: '✨', words: 'сделать, показать, надеть, кинуть, бросить, шепнуть, прошептать', example: 'показать мем' },
-  { emoji: '🙌', words: 'дать пять, дай пять, пятюня  •  👋 помахать  •  💃 потанцевать, танцевать' },
-  { emoji: '😉', words: 'подмигнуть  •  😊 улыбнуться  •  👏 похлопать, аплодисменты' },
-  { emoji: '🌟', words: 'похвалить, молодец, восхититься  •  🎀 милота  •  🎉 поздравить, поздравляю' },
-  { emoji: '💪', words: 'поддержать, подбодрить  •  ❤️‍🩹 утешить, пожалеть' },
-  { emoji: '🙏', words: 'поблагодарить, спасибо  •  🙇 извиниться, прости, извини' },
-  { emoji: '⏰', words: 'разбудить, проснись  •  🌙 спокойной ночи, пожелать спокойной ночи  •  ❤️ люблю' },
-];
+const maskSpoilersPreview = (text: string) =>
+  text.replace(/\|\|[\s\S]+?\|\|/g, '[спойлер]');
+
+const SpoilerSpan: React.FC<{
+  isMe: boolean;
+  children: React.ReactNode;
+}> = ({ isMe, children }) => {
+  const [revealed, setRevealed] = useState(false);
+
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      onClick={(e) => {
+        e.stopPropagation();
+        setRevealed((prev) => !prev);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          setRevealed((prev) => !prev);
+        }
+      }}
+      title={revealed ? 'Спойлер открыт (нажмите, чтобы скрыть)' : 'Спойлер: нажмите, чтобы открыть'}
+      className={`inline rounded px-1 py-0.2 mx-0.5 transition-all duration-200 cursor-pointer ${
+        revealed
+          ? isMe
+            ? 'bg-black/25 text-white'
+            : 'bg-neutral-900/90 text-neutral-100'
+          : isMe
+          ? 'bg-black/40 text-transparent blur-[5px] select-none hover:brightness-110'
+          : 'bg-neutral-950/90 text-transparent blur-[5px] select-none hover:bg-neutral-900'
+      }`}
+    >
+      <span className={revealed ? '' : isMe ? 'text-white' : 'text-neutral-200'}>
+        {children}
+      </span>
+    </span>
+  );
+};
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -115,13 +144,17 @@ interface ChatPanelProps {
   isKeyboardOpen?: boolean;
   typingNicknames?: string[];
   roomUploadProgress?: RoomUploadProgress | null;
+  pinnedMessage?: PinnedChatMessage | null;
   onSendMessage: (text: string, replyTo?: ChatReplyRef, stickerId?: string) => void;
   onEditMessage: (messageId: string, text: string) => void;
   onDeleteMessage: (messageId: string) => void;
+  onPinMessage?: (msg: ChatMessage) => void;
+  onUnpinMessage?: () => void;
   onTypingChange?: (isTyping: boolean) => void;
   onSendFloatingEmoji?: (emoji: string) => void;
   onSeekToTimecode?: (seconds: number) => void;
   onLocalMediaMessageSent?: (message: ChatMessage) => void;
+  onOpenMechanics?: (tab?: MechanicsTabId) => void;
 }
 
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
@@ -136,13 +169,17 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   isKeyboardOpen = false,
   typingNicknames = [],
   roomUploadProgress = null,
+  pinnedMessage = null,
   onSendMessage,
   onEditMessage,
   onDeleteMessage,
+  onPinMessage,
+  onUnpinMessage,
   onTypingChange,
   onSendFloatingEmoji,
   onSeekToTimecode,
   onLocalMediaMessageSent,
+  onOpenMechanics,
 }) => {
   const [text, setText] = useState('');
   const [showStickerPicker, setShowStickerPicker] = useState(false);
@@ -156,7 +193,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [activeMenuMessageId, setActiveMenuMessageId] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
-  const [showActionsHelp, setShowActionsHelp] = useState(false);
   const [isScrolledUp, setIsScrolledUp] = useState(false);
   const [unreadInFeed, setUnreadInFeed] = useState(0);
 
@@ -178,17 +214,15 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   }, []);
 
   useEffect(() => {
-    if (!activeMenuMessageId && !showStickerPicker && !showActionsHelp) return;
+    if (!activeMenuMessageId && !showStickerPicker) return;
     const handleClose = () => {
       setActiveMenuMessageId(null);
       setShowStickerPicker(false);
-      setShowActionsHelp(false);
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setActiveMenuMessageId(null);
         setShowStickerPicker(false);
-        setShowActionsHelp(false);
       }
     };
     document.addEventListener('click', handleClose);
@@ -197,7 +231,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       document.removeEventListener('click', handleClose);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [activeMenuMessageId, showStickerPicker, showActionsHelp]);
+  }, [activeMenuMessageId, showStickerPicker]);
 
   useEffect(() => {
     if (!pendingFile) {
@@ -479,9 +513,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     }
   };
 
-  const renderMessageTextWithTimecodes = (msgText: string, isMe: boolean) => {
-    const parts = msgText.split(/(\b(?:\d{1,2}:)?[0-5]?\d:[0-5]\d\b)/g);
-    if (parts.length === 1) return msgText;
+  const renderTimecodeParts = (segmentText: string, isMe: boolean, keyPrefix: string) => {
+    const parts = segmentText.split(/(\b(?:\d{1,2}:)?[0-5]?\d:[0-5]\d\b)/g);
+    if (parts.length === 1) return segmentText;
 
     return parts.map((part, idx) => {
       if (idx % 2 === 1) {
@@ -489,7 +523,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         if (seconds !== null) {
           return (
             <button
-              key={idx}
+              key={`${keyPrefix}-${idx}`}
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
@@ -514,7 +548,30 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           );
         }
       }
-      return <React.Fragment key={idx}>{part}</React.Fragment>;
+      return <React.Fragment key={`${keyPrefix}-${idx}`}>{part}</React.Fragment>;
+    });
+  };
+
+  const renderMessageTextWithTimecodes = (msgText: string, isMe: boolean) => {
+    const spoilerParts = msgText.split(/(\|\|[\s\S]+?\|\|)/g);
+    if (spoilerParts.length === 1) {
+      return renderTimecodeParts(msgText, isMe, 'plain');
+    }
+
+    return spoilerParts.map((seg, sIdx) => {
+      if (sIdx % 2 === 1 && seg.startsWith('||') && seg.endsWith('||') && seg.length > 4) {
+        const inner = seg.slice(2, -2);
+        return (
+          <SpoilerSpan key={`sp-${sIdx}`} isMe={isMe}>
+            {renderTimecodeParts(inner, isMe, `sp-${sIdx}`)}
+          </SpoilerSpan>
+        );
+      }
+      return (
+        <React.Fragment key={`txt-${sIdx}`}>
+          {renderTimecodeParts(seg, isMe, `txt-${sIdx}`)}
+        </React.Fragment>
+      );
     });
   };
 
@@ -551,71 +608,62 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         </div>
       )}
 
-      {/* Slim Chat Top Bar with small RP Actions Icon (replaces /help) */}
+      {/* Slim Chat Top Bar with quick link to Mechanics / RP Guide */}
       {!isKeyboardOpen && (
         <div className="px-3 py-1.5 bg-neutral-950/60 border-b border-neutral-800/80 flex items-center justify-between shrink-0 relative">
           <span className="text-[11px] font-medium text-neutral-400 select-none">
             Чат комнаты
           </span>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setShowActionsHelp((prev) => !prev);
-            }}
-            className={`w-6 h-6 rounded-lg border flex items-center justify-center transition cursor-pointer ${
-              showActionsHelp
-                ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
-                : 'bg-neutral-900 hover:bg-neutral-800 border-neutral-800 text-neutral-400 hover:text-amber-300'
-            }`}
-            title="Доступные действия в чате"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-          </button>
-
-          {showActionsHelp && (
-            <div
-              onClick={(e) => e.stopPropagation()}
-              className="absolute top-full mt-1.5 right-2 left-2 sm:left-auto sm:w-80 bg-neutral-900/95 backdrop-blur-md border border-neutral-700/80 rounded-2xl shadow-2xl z-30 overflow-hidden"
+          {onOpenMechanics && (
+            <button
+              type="button"
+              onClick={() => onOpenMechanics('rp')}
+              className="px-2 py-0.5 rounded-lg border bg-neutral-900 hover:bg-neutral-800 border-neutral-800 text-neutral-400 hover:text-amber-300 flex items-center gap-1 text-[10px] font-medium transition cursor-pointer"
+              title="Открыть справочник RP-действий и механик"
             >
-              <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between bg-neutral-950/70">
-                <div className="flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span className="text-xs font-semibold text-white">Действия в ответе</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowActionsHelp(false)}
-                  className="p-0.5 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer"
-                  title="Закрыть"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
+              <Sparkles className="w-3 h-3 text-amber-400" />
+              <span>Действия</span>
+            </button>
+          )}
+        </div>
+      )}
 
-              <div className="p-2.5 max-h-64 overflow-y-auto space-y-1.5 text-[11px]">
-                <p className="text-neutral-400 leading-snug pb-1 border-b border-neutral-800/80">
-                  Нажмите на сообщение участника и ответьте словом ниже. Можно добавить уточнение, например:{' '}
-                  <span className="text-amber-300 font-medium">поцеловать в щеку</span>.
-                </p>
-                {RP_ACTIONS_GROUPS.map((grp, idx) => (
-                  <div
-                    key={idx}
-                    className="flex items-start gap-2 px-2 py-1 rounded-lg bg-neutral-950/60 border border-neutral-800/60"
-                  >
-                    <span className="text-sm leading-none mt-0.5 shrink-0">{grp.emoji}</span>
-                    <div className="min-w-0 text-neutral-200 leading-snug">
-                      <span>{grp.words}</span>
-                      {grp.example && (
-                        <span className="block text-[10px] text-amber-300/90 mt-0.5">
-                          напр.: «{grp.example}»
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
+      {/* Host Pinned Message Banner */}
+      {pinnedMessage && !isKeyboardOpen && (
+        <div
+          onClick={() => scrollToMessage(pinnedMessage.id)}
+          className="px-3 py-1.5 bg-neutral-950/85 hover:bg-neutral-900/95 border-b border-neutral-800/80 border-l-2 border-l-amber-400 flex items-center justify-between gap-2 shrink-0 cursor-pointer transition"
+          title="Нажмите, чтобы перейти к закрепленному сообщению"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <Pin className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <div className="min-w-0">
+              <div className="text-[10px] font-semibold text-amber-300 truncate">
+                Закреплено • {pinnedMessage.nickname}
+              </div>
+              <div className="text-[11px] text-neutral-300 truncate">
+                {pinnedMessage.text
+                  ? maskSpoilersPreview(pinnedMessage.text)
+                  : pinnedMessage.isSticker
+                  ? '[Стикер]'
+                  : pinnedMessage.hasMedia
+                  ? `[${formatMediaLabel(pinnedMessage.mediaKind)}]`
+                  : 'Сообщение'}
               </div>
             </div>
+          </div>
+          {isHost && onUnpinMessage && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onUnpinMessage();
+              }}
+              className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white cursor-pointer shrink-0"
+              title="Открепить сообщение"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           )}
         </div>
       )}
@@ -785,6 +833,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                 )}
 
                 {msg.stickerUrl ? (
+                  <div className={`flex items-center gap-1.5 group/msg ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
                   <div
                     onClick={(e) => {
                       e.stopPropagation();
@@ -809,12 +858,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                       >
                         <div className="font-semibold truncate">{msg.replyTo.nickname}</div>
                         <div className="truncate opacity-80">
-                          {msg.replyTo.text ||
-                            (msg.replyTo.isSticker
-                              ? '[Стикер]'
-                              : msg.replyTo.hasMedia
-                              ? `[${formatMediaLabel(msg.replyTo.mediaKind)}]`
-                              : 'Сообщение')}
+                          {msg.replyTo.text
+                            ? maskSpoilersPreview(msg.replyTo.text)
+                            : msg.replyTo.isSticker
+                            ? '[Стикер]'
+                            : msg.replyTo.hasMedia
+                            ? `[${formatMediaLabel(msg.replyTo.mediaKind)}]`
+                            : 'Сообщение'}
                         </div>
                       </div>
                     )}
@@ -824,7 +874,38 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                       className="w-20 h-20 sm:w-24 sm:h-24 object-contain drop-shadow-lg select-none"
                     />
                   </div>
+                  {isHost && !isMe && onPinMessage && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (pinnedMessage?.id === msg.id) {
+                          onUnpinMessage?.();
+                        } else {
+                          onPinMessage(msg);
+                        }
+                      }}
+                      className={`p-1 rounded-lg border transition cursor-pointer shrink-0 ${
+                        pinnedMessage?.id === msg.id
+                          ? 'opacity-100 bg-amber-500/20 border-amber-500/40 text-amber-300'
+                          : 'opacity-45 sm:opacity-0 sm:group-hover/msg:opacity-100 bg-neutral-900/90 border-neutral-800 text-neutral-400 hover:text-amber-300'
+                      }`}
+                      title={pinnedMessage?.id === msg.id ? 'Открепить' : 'Закрепить сообщение'}
+                    >
+                      {pinnedMessage?.id === msg.id ? (
+                        <PinOff className="w-3 h-3" />
+                      ) : (
+                        <Pin className="w-3 h-3" />
+                      )}
+                    </button>
+                  )}
+                  </div>
                 ) : (
+                  <div
+                    className={`flex items-center gap-1.5 group/msg ${
+                      isHost && !isMe && onPinMessage ? 'max-w-[90%]' : 'max-w-[85%]'
+                    } ${isMe ? 'flex-row-reverse' : 'flex-row'}`}
+                  >
                   <div
                     onClick={(e) => {
                       e.stopPropagation();
@@ -835,7 +916,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                       }
                     }}
                     title={isMe ? 'Нажмите для действий с сообщением' : 'Нажмите, чтобы ответить'}
-                    className={`px-3 py-2 text-xs md:text-sm max-w-[85%] break-words shadow-sm space-y-1.5 cursor-pointer active:scale-[0.99] transition select-text ${bubbleCornerClass} ${
+                    className={`px-3 py-2 text-xs md:text-sm min-w-0 break-words [overflow-wrap:anywhere] shadow-sm space-y-1.5 cursor-pointer active:scale-[0.99] transition select-text ${bubbleCornerClass} ${
                       isMe
                         ? 'bg-rose-600 hover:bg-rose-500/95 text-white'
                         : 'bg-neutral-800 hover:bg-neutral-700/80 text-neutral-200 border border-neutral-700/60'
@@ -855,12 +936,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                       >
                         <div className="font-semibold truncate">{msg.replyTo.nickname}</div>
                         <div className="truncate opacity-80">
-                          {msg.replyTo.text ||
-                            (msg.replyTo.isSticker
-                              ? '[Стикер]'
-                              : msg.replyTo.hasMedia
-                              ? `[${formatMediaLabel(msg.replyTo.mediaKind)}]`
-                              : 'Сообщение')}
+                          {msg.replyTo.text
+                            ? maskSpoilersPreview(msg.replyTo.text)
+                            : msg.replyTo.isSticker
+                            ? '[Стикер]'
+                            : msg.replyTo.hasMedia
+                            ? `[${formatMediaLabel(msg.replyTo.mediaKind)}]`
+                            : 'Сообщение'}
                         </div>
                       </div>
                     )}
@@ -921,29 +1003,84 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                       <span className="block text-[10px] opacity-65 italic">(изм.)</span>
                     )}
                   </div>
+                  {isHost && !isMe && onPinMessage && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (pinnedMessage?.id === msg.id) {
+                          onUnpinMessage?.();
+                        } else {
+                          onPinMessage(msg);
+                        }
+                      }}
+                      className={`p-1 rounded-lg border transition cursor-pointer shrink-0 ${
+                        pinnedMessage?.id === msg.id
+                          ? 'opacity-100 bg-amber-500/20 border-amber-500/40 text-amber-300'
+                          : 'opacity-45 sm:opacity-0 sm:group-hover/msg:opacity-100 bg-neutral-900/90 border-neutral-800 text-neutral-400 hover:text-amber-300'
+                      }`}
+                      title={pinnedMessage?.id === msg.id ? 'Открепить' : 'Закрепить сообщение'}
+                    >
+                      {pinnedMessage?.id === msg.id ? (
+                        <PinOff className="w-3 h-3" />
+                      ) : (
+                        <Pin className="w-3 h-3" />
+                      )}
+                    </button>
+                  )}
+                  </div>
                 )}
 
-                {/* Own message click context menu (Reply + Edit + Delete) */}
+                {/* Own message click context menu (Reply + Pin + Edit + Delete) */}
                 {isMe && activeMenuMessageId === msg.id && (
                   <div
                     onClick={(e) => e.stopPropagation()}
-                    className="mt-1 flex items-center gap-1 bg-neutral-950 border border-neutral-700/80 rounded-xl p-1 shadow-xl z-30"
+                    className="mt-1 flex flex-wrap items-center gap-1 bg-neutral-950 border border-neutral-700/80 rounded-xl p-1 shadow-xl z-30"
                   >
                     <button
                       type="button"
                       onClick={() => startReply(msg)}
-                      className="px-2.5 py-1 rounded-lg hover:bg-neutral-800 text-[11px] font-medium text-neutral-200 flex items-center gap-1.5 cursor-pointer transition"
+                      className="px-2 py-1 rounded-lg hover:bg-neutral-800 text-[11px] font-medium text-neutral-200 flex items-center gap-1.5 cursor-pointer transition"
                     >
                       <Reply className="w-3.5 h-3.5 text-sky-400" />
                       <span>Ответить</span>
                     </button>
+                    {isHost && onPinMessage && (
+                      <>
+                        <div className="w-px h-4 bg-neutral-800" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (pinnedMessage?.id === msg.id) {
+                              onUnpinMessage?.();
+                            } else {
+                              onPinMessage(msg);
+                            }
+                            setActiveMenuMessageId(null);
+                          }}
+                          className="px-2 py-1 rounded-lg hover:bg-neutral-800 text-[11px] font-medium text-neutral-200 flex items-center gap-1.5 cursor-pointer transition"
+                        >
+                          {pinnedMessage?.id === msg.id ? (
+                            <>
+                              <PinOff className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Открепить</span>
+                            </>
+                          ) : (
+                            <>
+                              <Pin className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Закрепить</span>
+                            </>
+                          )}
+                        </button>
+                      </>
+                    )}
                     {!msg.stickerId && (
                       <>
                         <div className="w-px h-4 bg-neutral-800" />
                         <button
                           type="button"
                           onClick={() => startEdit(msg)}
-                          className="px-2.5 py-1 rounded-lg hover:bg-neutral-800 text-[11px] font-medium text-neutral-200 flex items-center gap-1.5 cursor-pointer transition"
+                          className="px-2 py-1 rounded-lg hover:bg-neutral-800 text-[11px] font-medium text-neutral-200 flex items-center gap-1.5 cursor-pointer transition"
                         >
                           <Pencil className="w-3.5 h-3.5 text-amber-400" />
                           <span>Изменить</span>
@@ -959,7 +1096,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                         if (replyingTo?.id === msg.id) setReplyingTo(null);
                         if (editingMessage?.id === msg.id) cancelEdit();
                       }}
-                      className="px-2.5 py-1 rounded-lg hover:bg-rose-950/70 text-[11px] font-medium text-rose-400 flex items-center gap-1.5 cursor-pointer transition"
+                      className="px-2 py-1 rounded-lg hover:bg-rose-950/70 text-[11px] font-medium text-rose-400 flex items-center gap-1.5 cursor-pointer transition"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>Удалить</span>
@@ -1048,10 +1185,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   Редактирование сообщения
                 </div>
                 <div className="text-[11px] text-neutral-400 truncate">
-                  {editingMessage.text ||
-                    (editingMessage.media
-                      ? `[${formatMediaLabel(editingMessage.media.mediaKind)}]`
-                      : 'Сообщение')}
+                  {editingMessage.text
+                    ? maskSpoilersPreview(editingMessage.text)
+                    : editingMessage.media
+                    ? `[${formatMediaLabel(editingMessage.media.mediaKind)}]`
+                    : 'Сообщение'}
                 </div>
               </div>
             </div>
@@ -1077,12 +1215,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                     Ответ для {replyingTo.nickname}
                   </div>
                   <div className="text-[11px] text-neutral-400 truncate">
-                    {replyingTo.text ||
-                      (replyingTo.stickerId
-                        ? '[Стикер]'
-                        : replyingTo.media
-                        ? `[${formatMediaLabel(replyingTo.media.mediaKind)}]`
-                        : 'Сообщение')}
+                    {replyingTo.text
+                      ? maskSpoilersPreview(replyingTo.text)
+                      : replyingTo.stickerId
+                      ? '[Стикер]'
+                      : replyingTo.media
+                      ? `[${formatMediaLabel(replyingTo.media.mediaKind)}]`
+                      : 'Сообщение'}
                   </div>
                 </div>
               </div>

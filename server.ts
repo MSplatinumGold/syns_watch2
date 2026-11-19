@@ -54,6 +54,8 @@ function toPublicRoomState(room: ServerRoomState): RoomState {
     currentTrackIndex: room.currentTrackIndex,
     playbackState: room.playbackState,
     activeUpload: room.activeUpload ?? null,
+    readyCheck: room.readyCheck ?? null,
+    pinnedMessage: room.pinnedMessage ?? null,
   };
 }
 
@@ -627,6 +629,8 @@ app.post('/api/rooms/create', (req, res) => {
     },
     emptyTimeoutId: null,
     activeUpload: null,
+    readyCheck: null,
+    pinnedMessage: null,
     chatMediaFiles: [],
     chatMediaTotalBytes: 0,
     lastActivityAt: Date.now(),
@@ -1463,6 +1467,8 @@ io.on('connection', (socket) => {
         },
         emptyTimeoutId: null,
         activeUpload: null,
+        readyCheck: null,
+        pinnedMessage: null,
         chatMediaFiles: [],
         chatMediaTotalBytes: 0,
         lastActivityAt: Date.now(),
@@ -1598,6 +1604,11 @@ io.on('connection', (socket) => {
       currentTime,
       serverTimestamp: room.playbackState.lastUpdatedServerTime,
     });
+
+    if (room.readyCheck) {
+      room.readyCheck = null;
+      io.to(currentRoomId).emit('room:ready_check_updated', null);
+    }
   });
 
   // Host: Pause
@@ -1655,6 +1666,11 @@ io.on('connection', (socket) => {
       timestamp: Date.now(),
       type: 'system',
     });
+
+    if (room.readyCheck) {
+      room.readyCheck = null;
+      io.to(currentRoomId).emit('room:ready_check_updated', null);
+    }
   });
 
   // Host: Change Track
@@ -1777,6 +1793,99 @@ io.on('connection', (socket) => {
       timestamp: Date.now(),
       type: 'system',
     });
+  });
+
+  // Ready Check: Host start / cancel & Client confirm
+  socket.on('host:start_ready_check', () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.hostId !== socket.id) return;
+
+    const actor = room.users[socket.id];
+    room.lastActivityAt = Date.now();
+    room.readyCheck = {
+      id: uuidv4(),
+      startedBy: actor?.nickname || 'Хост',
+      startedAt: Date.now(),
+      readyUserIds: [socket.id],
+    };
+
+    io.to(currentRoomId).emit('room:ready_check_updated', room.readyCheck);
+    io.to(currentRoomId).emit('chat:message', {
+      id: uuidv4(),
+      userId: 'system',
+      nickname: 'Система',
+      text: '🍿 Хост запустил проверку готовности «Все на месте?»',
+      timestamp: Date.now(),
+      type: 'system',
+    });
+  });
+
+  socket.on('host:cancel_ready_check', () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.hostId !== socket.id || !room.readyCheck) return;
+
+    room.readyCheck = null;
+    io.to(currentRoomId).emit('room:ready_check_updated', null);
+  });
+
+  socket.on('client:ready_confirm', () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || !room.readyCheck || !room.users[socket.id]) return;
+
+    if (!room.readyCheck.readyUserIds.includes(socket.id)) {
+      room.readyCheck.readyUserIds.push(socket.id);
+      room.lastActivityAt = Date.now();
+      io.to(currentRoomId).emit('room:ready_check_updated', room.readyCheck);
+    }
+  });
+
+  // Host: Pin / Unpin Chat Message
+  socket.on('host:pin_message', ({ messageId, text, nickname, hasMedia, mediaKind, isSticker }) => {
+    if (!currentRoomId || typeof messageId !== 'string' || !messageId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.hostId !== socket.id) return;
+
+    const actor = room.users[socket.id];
+    const safeText = (typeof text === 'string' ? text : '').replace(/[\r\n]+/g, ' ').trim().slice(0, 180);
+    const safeNick = (typeof nickname === 'string' ? nickname : '').trim().slice(0, 24) || 'Участник';
+    const validMediaKind =
+      mediaKind === 'image' || mediaKind === 'video' || mediaKind === 'audio'
+        ? mediaKind
+        : undefined;
+
+    room.lastActivityAt = Date.now();
+    room.pinnedMessage = {
+      id: messageId.slice(0, 64),
+      nickname: safeNick,
+      text: safeText,
+      pinnedBy: actor?.nickname || 'Хост',
+      pinnedAt: Date.now(),
+      hasMedia: Boolean(hasMedia),
+      mediaKind: validMediaKind,
+      isSticker: Boolean(isSticker),
+    };
+
+    io.to(currentRoomId).emit('chat:pinned_updated', room.pinnedMessage);
+    io.to(currentRoomId).emit('chat:message', {
+      id: uuidv4(),
+      userId: 'system',
+      nickname: 'Система',
+      text: `📌 Хост закрепил сообщение от ${safeNick}`,
+      timestamp: Date.now(),
+      type: 'system',
+    });
+  });
+
+  socket.on('host:unpin_message', () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.hostId !== socket.id || !room.pinnedMessage) return;
+
+    room.pinnedMessage = null;
+    io.to(currentRoomId).emit('chat:pinned_updated', null);
   });
 
   // Smart Buffer Barrier: Client Buffering Start
@@ -1941,11 +2050,17 @@ io.on('connection', (socket) => {
     const cleanText = (typeof text === 'string' ? text : '').trim().slice(0, 500);
     if (!cleanText && !entry.mediaId) return;
 
+    const editedAt = Date.now();
     io.to(currentRoomId).emit('chat:edited', {
       messageId,
       text: cleanText,
-      editedAt: Date.now(),
+      editedAt,
     });
+
+    if (room.pinnedMessage && room.pinnedMessage.id === messageId) {
+      room.pinnedMessage.text = cleanText.replace(/[\r\n]+/g, ' ').slice(0, 180);
+      io.to(currentRoomId).emit('chat:pinned_updated', room.pinnedMessage);
+    }
   });
 
   // Delete own chat message
@@ -1970,6 +2085,11 @@ io.on('connection', (socket) => {
     }
 
     io.to(currentRoomId).emit('chat:deleted', { messageId });
+
+    if (room.pinnedMessage && room.pinnedMessage.id === messageId) {
+      room.pinnedMessage = null;
+      io.to(currentRoomId).emit('chat:pinned_updated', null);
+    }
   });
 
   // Host upload progress broadcast (throttled on client)
@@ -2065,6 +2185,14 @@ io.on('connection', (socket) => {
     delete room.users[socket.id];
 
     const remainingUsers = Object.values(room.users);
+
+    if (room.readyCheck && remainingUsers.length > 0) {
+      const nextReady = room.readyCheck.readyUserIds.filter((id) => id !== socket.id);
+      if (nextReady.length !== room.readyCheck.readyUserIds.length) {
+        room.readyCheck.readyUserIds = nextReady;
+        io.to(currentRoomId).emit('room:ready_check_updated', room.readyCheck);
+      }
+    }
 
     if (room.hostId === socket.id) {
       if (remainingUsers.length > 0) {

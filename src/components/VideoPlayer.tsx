@@ -17,12 +17,16 @@ import {
   UploadCloud,
   PanelRightClose,
   PanelRightOpen,
+  Check,
+  X,
 } from 'lucide-react';
 import type {
   PlaylistItem,
   RoomPlaybackState,
   DanmakuItem,
   FloatingEmojiItem,
+  ReadyCheckState,
+  User,
 } from '../types/watchparty.ts';
 import { formatTime, parseTime } from '../utils/format.ts';
 import { DanmakuOverlay, FloatingEmojisOverlay } from './DanmakuOverlay.tsx';
@@ -40,6 +44,9 @@ interface VideoPlayerProps {
   ambilightEnabled?: boolean;
   clockOffsetMs?: number;
   localFileUrl?: string;
+  readyCheck?: ReadyCheckState | null;
+  users?: Record<string, User>;
+  currentUserId?: string;
   onPlay: (currentTime: number) => void;
   onPause: (currentTime: number) => void;
   onSeek: (targetTime: number) => void;
@@ -50,6 +57,9 @@ interface VideoPlayerProps {
   onProgressReport?: (currentTime: number) => void;
   onTriggerUpload?: () => void;
   onToggleTheater?: () => void;
+  onStartReadyCheck?: () => void;
+  onCancelReadyCheck?: () => void;
+  onConfirmReady?: () => void;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -65,6 +75,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   ambilightEnabled = true,
   clockOffsetMs = 0,
   localFileUrl,
+  readyCheck = null,
+  users = {},
+  currentUserId = '',
   onPlay,
   onPause,
   onSeek,
@@ -75,6 +88,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onProgressReport,
   onTriggerUpload,
   onToggleTheater,
+  onStartReadyCheck,
+  onCancelReadyCheck,
+  onConfirmReady,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -810,6 +826,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const displayTime = scrubbingTime !== null ? scrubbingTime : currentTime;
   const progressPercent = duration > 0 ? (displayTime / duration) * 100 : 0;
 
+  const userList = Object.values(users);
+  const totalUsersCount = userList.length;
+  const readySet = new Set(readyCheck?.readyUserIds || []);
+  const readyUsersCount = readyCheck
+    ? userList.filter((u) => readySet.has(u.id)).length
+    : 0;
+  const isSelfReady = Boolean(currentUserId && readySet.has(currentUserId));
+  const allUsersReady = totalUsersCount > 0 && readyUsersCount === totalUsersCount;
+  const readyProgressPercent =
+    totalUsersCount > 0 ? Math.round((readyUsersCount / totalUsersCount) * 100) : 0;
+
   return (
     <div
       ref={stageRef}
@@ -1014,10 +1041,130 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
-      {/* Top Header Overlay with Title & Danmaku Toggle */}
+      {/* Floating Ready Check ("Все на месте? 🍿") Card */}
+      {readyCheck && (
+        <div className="absolute top-11 sm:top-14 left-1/2 -translate-x-1/2 z-30 w-[calc(100%-1.5rem)] max-w-md pointer-events-auto">
+          <div className="bg-neutral-950/90 backdrop-blur-xl border border-neutral-700/80 rounded-2xl shadow-2xl p-3 sm:p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-base leading-none shrink-0">🍿</span>
+                <div className="min-w-0">
+                  <div className="text-xs sm:text-sm font-bold text-white truncate">
+                    Все на месте?
+                  </div>
+                  <div className="text-[11px] text-neutral-400 truncate">
+                    Инициатор: {readyCheck.startedBy}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <span
+                  className={`px-2 py-0.5 rounded-full text-xs font-mono tabular-nums font-bold border ${
+                    allUsersReady
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  }`}
+                >
+                  {readyUsersCount}/{totalUsersCount}
+                </span>
+                {isHost && onCancelReadyCheck && (
+                  <button
+                    type="button"
+                    onClick={onCancelReadyCheck}
+                    className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white transition cursor-pointer"
+                    title="Закрыть проверку готовности"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Readiness progress bar */}
+            <div className="w-full h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+              <div
+                className={`h-full transition-all duration-300 rounded-full ${
+                  allUsersReady
+                    ? 'bg-emerald-500'
+                    : 'bg-gradient-to-r from-rose-500 to-amber-500'
+                }`}
+                style={{ width: `${readyProgressPercent}%` }}
+              />
+            </div>
+
+            {/* Compact user status pills */}
+            {userList.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+                {userList.map((u) => {
+                  const isReady = readySet.has(u.id);
+                  return (
+                    <span
+                      key={u.id}
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                        isReady
+                          ? 'bg-emerald-500/15 text-emerald-200 border-emerald-500/35'
+                          : 'bg-neutral-900/90 text-neutral-400 border-neutral-700/70'
+                      }`}
+                    >
+                      {isReady ? (
+                        <Check className="w-3 h-3 text-emerald-400 shrink-0" />
+                      ) : (
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400/80 animate-pulse shrink-0" />
+                      )}
+                      <span className="truncate max-w-[110px]">{u.nickname}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Action buttons */}
+            <div className="flex items-center justify-end gap-2 pt-0.5">
+              {!isSelfReady && onConfirmReady && (
+                <button
+                  type="button"
+                  onClick={onConfirmReady}
+                  className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 shadow-lg shadow-emerald-600/25 transition active:scale-95 cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Я готов 🍿</span>
+                </button>
+              )}
+
+              {isHost && videoSourceUrl && (
+                <button
+                  type="button"
+                  onClick={() => onPlay(currentTimeRef.current)}
+                  className={`px-3 py-1.5 rounded-xl text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95 cursor-pointer ${
+                    allUsersReady
+                      ? 'bg-emerald-600 hover:bg-emerald-500 shadow-lg shadow-emerald-600/30'
+                      : 'bg-rose-600 hover:bg-rose-500 shadow-lg shadow-rose-600/25'
+                  }`}
+                >
+                  <Play className="w-3.5 h-3.5 fill-white" />
+                  <span>Запустить</span>
+                </button>
+              )}
+
+              {isHost && onCancelReadyCheck && (
+                <button
+                  type="button"
+                  onClick={onCancelReadyCheck}
+                  className="px-2.5 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white text-xs font-medium border border-neutral-700 transition cursor-pointer"
+                >
+                  Закрыть
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Top Header Overlay with Title, Ready Check & Danmaku Toggle */}
       <div
         className={`absolute top-0 left-0 right-0 p-2 sm:p-4 bg-gradient-to-b from-black/80 via-black/30 to-transparent flex items-center justify-between z-20 transition-opacity duration-300 ${
-          showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          showControls || readyCheck ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
         <div className="flex items-center gap-2 overflow-hidden mr-4">
@@ -1030,6 +1177,30 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          {isHost && onStartReadyCheck && (
+            <button
+              type="button"
+              onClick={() => {
+                if (readyCheck) {
+                  onCancelReadyCheck?.();
+                } else {
+                  onStartReadyCheck();
+                }
+              }}
+              className={`px-2.5 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 transition cursor-pointer border ${
+                readyCheck
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                  : 'bg-neutral-800/80 hover:bg-neutral-700/90 text-neutral-200 border-neutral-700/60'
+              }`}
+              title="Проверка готовности зрителей «Все на месте? 🍿»"
+            >
+              <span className="leading-none">🍿</span>
+              <span className="hidden sm:inline">
+                {readyCheck ? `Готовы ${readyUsersCount}/${totalUsersCount}` : 'Все на месте?'}
+              </span>
+            </button>
+          )}
+
           <button
             onClick={() => setDanmakuEnabled(!danmakuEnabled)}
             className={`px-2.5 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 transition ${
