@@ -18,6 +18,7 @@ import {
   Check,
   UploadCloud,
   CheckCircle2,
+  ChevronDown,
 } from 'lucide-react';
 import type { ChatMessage, ChatReplyRef, RoomUploadProgress, User } from '../types/watchparty.ts';
 import { formatBytes, parseTime } from '../utils/format.ts';
@@ -156,11 +157,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [activeMenuMessageId, setActiveMenuMessageId] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [showActionsHelp, setShowActionsHelp] = useState(false);
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
+  const [unreadInFeed, setUnreadInFeed] = useState(0);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const mediaInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isNearBottomRef = useRef(true);
+  const lastTailMessageIdRef = useRef<string | null>(null);
   const lastTypingEmitAtRef = useRef<number>(0);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -208,24 +212,58 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setPendingPreviewUrl(null);
   }, [pendingFile]);
 
+  // Reset feed scroll state on room switch
+  useEffect(() => {
+    isNearBottomRef.current = true;
+    lastTailMessageIdRef.current = null;
+    setIsScrolledUp(false);
+    setUnreadInFeed(0);
+  }, [roomId]);
+
   // Track if user was scrolled near bottom before new messages
   const handleScroll = () => {
     const el = containerRef.current;
     if (!el) return;
     const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    isNearBottomRef.current = distanceToBottom < 60;
+    const nearBottom = distanceToBottom < 60;
+    isNearBottomRef.current = nearBottom;
+    setIsScrolledUp(!nearBottom);
+    if (nearBottom) {
+      setUnreadInFeed(0);
+    }
+  };
+
+  const scrollToBottom = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    isNearBottomRef.current = true;
+    setIsScrolledUp(false);
+    setUnreadInFeed(0);
   };
 
   // Safe inner container scroll (never scrolls the entire window/page on tablets)
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
-
     const lastMsg = messages[messages.length - 1];
-    const isMe = lastMsg && lastMsg.userId === currentUserId;
+    if (!lastMsg) {
+      lastTailMessageIdRef.current = null;
+      return;
+    }
 
-    if (isNearBottomRef.current || isMe) {
-      el.scrollTop = el.scrollHeight;
+    const isInitialLoad = lastTailMessageIdRef.current === null;
+    const hasNewTailMessage = lastMsg.id !== lastTailMessageIdRef.current;
+    if (!hasNewTailMessage) return;
+
+    lastTailMessageIdRef.current = lastMsg.id;
+    const isMe = lastMsg.userId === currentUserId;
+
+    if (isInitialLoad || isNearBottomRef.current || isMe) {
+      if (el) el.scrollTop = el.scrollHeight;
+      setIsScrolledUp(false);
+      setUnreadInFeed(0);
+    } else {
+      setUnreadInFeed((prev) => prev + 1);
     }
   }, [messages, currentUserId]);
 
@@ -464,7 +502,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   ? `Перемотать видео на ${part} (для всех)`
                   : `Таймкод ${part} (перемотать может хост)`
               }
-              className={`inline-flex items-center gap-0.5 px-1.5 py-0.2 mx-0.5 rounded font-mono text-[11px] font-semibold align-baseline border transition ${
+              className={`inline-flex items-center gap-0.5 px-1.5 py-0.2 mx-0.5 rounded font-mono tabular-nums text-[11px] font-semibold align-baseline border transition ${
                 isMe
                   ? 'bg-black/25 border-white/40 text-amber-200 hover:bg-black/40'
                   : 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25'
@@ -614,7 +652,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             </div>
           </div>
           <span
-            className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded shrink-0 ${
+            className={`text-[10px] font-mono tabular-nums font-bold px-1.5 py-0.5 rounded shrink-0 ${
               roomUploadProgress.status === 'error'
                 ? 'bg-rose-500/15 text-rose-300'
                 : roomUploadProgress.status === 'completed'
@@ -628,12 +666,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       )}
 
       {/* Messages Feed (collapsed when mobile keyboard is open so video stays visible) */}
+      <div className={isKeyboardOpen ? 'hidden' : 'relative flex-1 min-h-0 flex flex-col'}>
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className={`min-h-0 overflow-y-auto p-3.5 space-y-2.5 overscroll-contain ${
-          isKeyboardOpen ? 'hidden' : 'flex-1'
-        }`}
+        className="flex-1 min-h-0 overflow-y-auto p-3.5 overscroll-contain flex flex-col"
       >
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-6 text-neutral-500">
@@ -644,7 +681,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             </p>
           </div>
         ) : (
-          messages.map((msg) => {
+          messages.map((msg, idx) => {
+            const prevMsg = idx > 0 ? messages[idx - 1] : null;
+            const nextMsg = idx < messages.length - 1 ? messages[idx + 1] : null;
+
             if (msg.type === 'system') {
               const isMultiline = msg.text.includes('\n');
               return (
@@ -672,44 +712,77 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               );
             }
 
+            const isGroupedWithPrev = Boolean(
+              prevMsg &&
+                prevMsg.type === 'message' &&
+                prevMsg.userId === msg.userId &&
+                msg.timestamp - prevMsg.timestamp <= 120_000
+            );
+            const isGroupedWithNext = Boolean(
+              nextMsg &&
+                nextMsg.type === 'message' &&
+                nextMsg.userId === msg.userId &&
+                nextMsg.timestamp - msg.timestamp <= 120_000
+            );
+
             const isMe = msg.userId === currentUserId;
             const isMsgHost = msg.userId === hostId;
             const isHighlighted = highlightedMessageId === msg.id;
             const userPrefix = users[msg.userId]?.prefix ?? msg.prefix;
+
+            const bubbleCornerClass = isMe
+              ? isGroupedWithPrev && isGroupedWithNext
+                ? 'rounded-2xl rounded-tr-md rounded-br-md'
+                : isGroupedWithPrev
+                ? 'rounded-2xl rounded-tr-md'
+                : isGroupedWithNext
+                ? 'rounded-2xl rounded-tr-xs rounded-br-md'
+                : 'rounded-2xl rounded-tr-xs'
+              : isGroupedWithPrev && isGroupedWithNext
+              ? 'rounded-2xl rounded-tl-md rounded-bl-md'
+              : isGroupedWithPrev
+              ? 'rounded-2xl rounded-tl-md'
+              : isGroupedWithNext
+              ? 'rounded-2xl rounded-tl-xs rounded-bl-md'
+              : 'rounded-2xl rounded-tl-xs';
 
             return (
               <div
                 key={msg.id}
                 id={`chat-msg-${msg.id}`}
                 className={`flex flex-col transition-colors duration-300 rounded-xl ${
+                  idx > 0 ? (isGroupedWithPrev ? 'mt-0.5' : 'mt-2.5') : ''
+                } ${
                   isMe ? 'items-end' : 'items-start'
                 } ${isHighlighted ? 'bg-rose-500/10 ring-1 ring-rose-500/40 p-1 -m-1' : ''}`}
               >
-                <div className="flex items-center flex-wrap gap-1.5 mb-1 px-1">
-                  {userPrefix && (
-                    <span className="px-1.5 py-0.2 rounded bg-fuchsia-500/20 border border-fuchsia-400/40 text-fuchsia-300 text-[10px] font-semibold leading-tight max-w-[110px] truncate">
-                      {userPrefix}
+                {!isGroupedWithPrev && (
+                  <div className="flex items-center flex-wrap gap-1.5 mb-1 px-1">
+                    {userPrefix && (
+                      <span className="px-1.5 py-0.2 rounded bg-fuchsia-500/20 border border-fuchsia-400/40 text-fuchsia-300 text-[10px] font-semibold leading-tight max-w-[110px] truncate">
+                        {userPrefix}
+                      </span>
+                    )}
+                    <span
+                      className={`text-[11px] font-semibold flex items-center gap-1 ${
+                        isMsgHost
+                          ? 'text-amber-400'
+                          : isMe
+                          ? 'text-rose-400'
+                          : 'text-neutral-300'
+                      }`}
+                    >
+                      {isMsgHost && <Crown className="w-3 h-3 fill-amber-400 text-amber-400" />}
+                      {msg.nickname}
                     </span>
-                  )}
-                  <span
-                    className={`text-[11px] font-semibold flex items-center gap-1 ${
-                      isMsgHost
-                        ? 'text-amber-400'
-                        : isMe
-                        ? 'text-rose-400'
-                        : 'text-neutral-300'
-                    }`}
-                  >
-                    {isMsgHost && <Crown className="w-3 h-3 fill-amber-400 text-amber-400" />}
-                    {msg.nickname}
-                  </span>
-                  <span className="text-[10px] text-neutral-500 font-mono">
-                    {formatMessageTime(msg.timestamp)}
-                  </span>
-                  {msg.editedAt && (
-                    <span className="text-[10px] text-neutral-500 italic">(изм.)</span>
-                  )}
-                </div>
+                    <span className="text-[10px] text-neutral-500 font-mono tabular-nums">
+                      {formatMessageTime(msg.timestamp)}
+                    </span>
+                    {msg.editedAt && (
+                      <span className="text-[10px] text-neutral-500 italic">(изм.)</span>
+                    )}
+                  </div>
+                )}
 
                 {msg.stickerUrl ? (
                   <div
@@ -762,10 +835,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                       }
                     }}
                     title={isMe ? 'Нажмите для действий с сообщением' : 'Нажмите, чтобы ответить'}
-                    className={`px-3 py-2 rounded-2xl text-xs md:text-sm max-w-[85%] break-words shadow-sm space-y-1.5 cursor-pointer active:scale-[0.99] transition select-text ${
+                    className={`px-3 py-2 text-xs md:text-sm max-w-[85%] break-words shadow-sm space-y-1.5 cursor-pointer active:scale-[0.99] transition select-text ${bubbleCornerClass} ${
                       isMe
-                        ? 'bg-rose-600 hover:bg-rose-500/95 text-white rounded-tr-xs'
-                        : 'bg-neutral-800 hover:bg-neutral-700/80 text-neutral-200 border border-neutral-700/60 rounded-tl-xs'
+                        ? 'bg-rose-600 hover:bg-rose-500/95 text-white'
+                        : 'bg-neutral-800 hover:bg-neutral-700/80 text-neutral-200 border border-neutral-700/60'
                     }`}
                   >
                     {msg.replyTo && (
@@ -827,7 +900,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                           />
                         )}
                         {(!msg.media.expired || Boolean(getCachedChatMediaUrl(msg.media.url))) && (
-                          <div className="mt-1 flex items-center justify-between gap-2 text-[10px] opacity-75 font-mono">
+                          <div className="mt-1 flex items-center justify-between gap-2 text-[10px] opacity-75 font-mono tabular-nums">
                             <span className="truncate">{msg.media.originalName}</span>
                             <span className="shrink-0">{formatBytes(msg.media.size)}</span>
                           </div>
@@ -836,7 +909,17 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                       );
                     })()}
 
-                    {msg.text && <p>{renderMessageTextWithTimecodes(msg.text, isMe)}</p>}
+                    {msg.text && (
+                      <p>
+                        {renderMessageTextWithTimecodes(msg.text, isMe)}
+                        {isGroupedWithPrev && msg.editedAt && (
+                          <span className="text-[10px] opacity-65 italic ml-1.5">(изм.)</span>
+                        )}
+                      </p>
+                    )}
+                    {!msg.text && isGroupedWithPrev && msg.editedAt && (
+                      <span className="block text-[10px] opacity-65 italic">(изм.)</span>
+                    )}
                   </div>
                 )}
 
@@ -887,6 +970,25 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             );
           })
         )}
+      </div>
+
+      {/* Floating Scroll-to-Bottom Button with Unread Counter */}
+      {isScrolledUp && (
+        <button
+          type="button"
+          onClick={scrollToBottom}
+          className="absolute bottom-3 right-3 z-20 px-2.5 py-1.5 rounded-full bg-neutral-900/95 hover:bg-neutral-800 border border-neutral-700/80 text-neutral-200 hover:text-white shadow-xl backdrop-blur-md flex items-center gap-1.5 text-xs font-medium transition active:scale-95 cursor-pointer"
+          title="Прокрутить к новым сообщениям"
+        >
+          <ChevronDown className="w-4 h-4 text-rose-400" />
+          <span>Вниз</span>
+          {unreadInFeed > 0 && (
+            <span className="px-1.5 py-0.2 rounded-full bg-rose-600 text-white text-[10px] font-bold tabular-nums">
+              {unreadInFeed > 99 ? '99+' : unreadInFeed}
+            </span>
+          )}
+        </button>
+      )}
       </div>
 
       {/* Typing indicator */}
@@ -1050,7 +1152,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               )}
               <div className="min-w-0">
                 <p className="text-xs text-white font-medium truncate">{pendingFile.name}</p>
-                <p className="text-[10px] text-neutral-400 font-mono">
+                <p className="text-[10px] text-neutral-400 font-mono tabular-nums">
                   {formatBytes(pendingFile.size)} / 10 МБ макс.
                 </p>
               </div>
@@ -1112,7 +1214,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   <span className="text-xs font-semibold text-neutral-200 truncate">
                     {activePack.name}
                   </span>
-                  <span className="text-[10px] text-neutral-500 font-mono shrink-0">
+                  <span className="text-[10px] text-neutral-500 font-mono tabular-nums shrink-0">
                     {activePack.stickers.length}
                   </span>
                 </div>

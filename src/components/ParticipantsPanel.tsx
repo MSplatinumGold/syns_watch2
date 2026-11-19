@@ -88,7 +88,7 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
         <div className="flex items-center gap-2">
           <Users className="w-4 h-4 text-emerald-400" />
           <h3 className="text-xs md:text-sm font-semibold text-white">Участники</h3>
-          <span className="text-[11px] px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400 font-mono">
+          <span className="text-[11px] px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400 font-mono tabular-nums">
             {userList.length}
           </span>
         </div>
@@ -193,12 +193,12 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
 
                     {/* Real-Time Watching Second */}
                     <div className="flex items-center gap-2 mt-1">
-                      <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-1.5 py-0.5 rounded flex items-center gap-1">
+                      <span className="text-[11px] font-mono tabular-nums text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-1.5 py-0.5 rounded flex items-center gap-1">
                         <Clock className="w-2.5 h-2.5" />
                         {formatTime(userTime)}
                       </span>
 
-                      <span className="text-[10px] text-neutral-500 truncate">
+                      <span className="text-[10px] text-neutral-500 truncate tabular-nums">
                         {user.isBuffering
                           ? 'Буферизация...'
                           : isUserHost
@@ -283,7 +283,7 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
                     title={`Громкость ${user.nickname}: ${peerMuted ? 0 : peerVol}%`}
                   />
 
-                  <span className="text-[10px] font-mono text-neutral-400 w-9 text-right shrink-0">
+                  <span className="text-[10px] font-mono tabular-nums text-neutral-400 w-9 text-right shrink-0">
                     {peerMuted ? '0%' : `${peerVol}%`}
                   </span>
 

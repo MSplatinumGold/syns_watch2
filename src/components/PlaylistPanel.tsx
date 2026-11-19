@@ -535,7 +535,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         <div className="flex items-center gap-2">
           <Film className="w-4 h-4 text-rose-500" />
           <h3 className="text-xs md:text-sm font-semibold text-white">Плейлист</h3>
-          <span className="text-[11px] px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400 font-mono">
+          <span className="text-[11px] px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400 font-mono tabular-nums">
             {playlist.length}
           </span>
         </div>
@@ -655,7 +655,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           </div>
 
           {/* Row 3: Metrics (Transferred volume, Speed, ETA) */}
-          <div className="flex items-center justify-between text-[11px] text-neutral-400 font-mono">
+          <div className="flex items-center justify-between text-[11px] text-neutral-400 font-mono tabular-nums">
             <span>
               {formatBytes(upload.uploadedBytes)} / {formatBytes(upload.totalBytes)} (
               {Math.min(
@@ -731,7 +731,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                 <div className="flex items-center gap-2.5 min-w-0 flex-1">
                   <div
                     onClick={() => isHost && onChangeTrack(index)}
-                    className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-xs font-mono font-medium transition ${
+                    className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-xs font-mono tabular-nums font-medium transition ${
                       isPlayingThis
                         ? 'bg-rose-600 text-white shadow-sm'
                         : isHost
@@ -758,7 +758,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                       {item.originalName}
                     </p>
                     <div className="flex items-center gap-1.5 mt-0.5">
-                      <p className="text-[10px] text-neutral-500 font-mono">
+                      <p className="text-[10px] text-neutral-500 font-mono tabular-nums">
                         {formatBytes(item.size)}
                       </p>
                       {localTrackUrls?.[item.id] && (

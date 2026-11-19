@@ -28,6 +28,7 @@ import {
   registerLocalTrackFile,
   revokeLocalTrackUrl,
 } from './utils/mediaCache.ts';
+import { applyUiTheme, getSavedUiTheme, type UiThemeId } from './utils/themes.ts';
 import {
   MessageSquare,
   Film,
@@ -59,6 +60,15 @@ export default function App() {
   const [bufferingUsers, setBufferingUsers] = useState<string[]>([]);
   const [roomUploadProgress, setRoomUploadProgress] = useState<RoomUploadProgress | null>(null);
   const [localTrackUrls, setLocalTrackUrls] = useState<Record<string, string>>({});
+  const [uiTheme, setUiTheme] = useState<UiThemeId>(() => getSavedUiTheme());
+  const [ambilightEnabled, setAmbilightEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('watchparty_ambilight');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
 
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
   const roomIdRef = useRef<string | null>(null);
@@ -89,6 +99,8 @@ export default function App() {
   const isResizingChatRef = useRef<boolean>(false);
   const danmakuTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const emojiTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const danmakuLaneExpiryRef = useRef<number[]>([0, 0, 0, 0]);
+  const danmakuNextLaneRef = useRef<number>(0);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showAppNotice = useCallback((text: string, type: 'error' | 'info' = 'info') => {
@@ -141,6 +153,18 @@ export default function App() {
       sessionStorage.setItem(`watchparty_chat_${roomId}`, JSON.stringify(messages.slice(-250)));
     } catch {}
   }, [messages, roomId]);
+
+  // Persist & apply selected UI theme
+  useEffect(() => {
+    applyUiTheme(uiTheme);
+  }, [uiTheme]);
+
+  // Persist Ambilight preference
+  useEffect(() => {
+    try {
+      localStorage.setItem('watchparty_ambilight', String(ambilightEnabled));
+    } catch {}
+  }, [ambilightEnabled]);
 
   // Ensure session Blob URLs are released when App unmounts
   useEffect(() => {
@@ -567,11 +591,27 @@ export default function App() {
         });
       }
 
-      // Trigger Danmaku item at the BOTTOM of the screen when there is text
+      // Trigger Danmaku item on 4 dedicated bottom lanes to prevent text collisions
       if ((message.type === 'message' || message.type === 'action') && message.text) {
+        const lanes = [69, 75, 81, 87];
+        const now = Date.now();
+        let chosenIdx = -1;
+        for (let offset = 0; offset < lanes.length; offset++) {
+          const idx = (danmakuNextLaneRef.current + offset) % lanes.length;
+          if (danmakuLaneExpiryRef.current[idx] <= now) {
+            chosenIdx = idx;
+            break;
+          }
+        }
+        if (chosenIdx === -1) {
+          chosenIdx = danmakuNextLaneRef.current;
+        }
+        danmakuLaneExpiryRef.current[chosenIdx] = now + 2200;
+        danmakuNextLaneRef.current = (chosenIdx + 1) % lanes.length;
+
         const danmaku: DanmakuItem = {
           ...message,
-          topPercent: 72 + (Math.floor(Math.random() * 3) * 5), // 72%, 77%, 82% (bottom area, clear center)
+          topPercent: lanes[chosenIdx],
         };
         setDanmakuItems((prev) => [...prev, danmaku]);
 
@@ -962,6 +1002,8 @@ export default function App() {
         {NoticeBanner}
         <JoinModal
           initialRoomId={initialUrlRoomId}
+          uiTheme={uiTheme}
+          onChangeUiTheme={setUiTheme}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
         />
@@ -987,7 +1029,7 @@ export default function App() {
         <MessageSquare className="w-3.5 h-3.5" />
         <span>Чат</span>
         {unreadChatCount > 0 && activeTab !== 'chat' && (
-          <span className="ml-1 px-1.5 py-0.2 rounded-full bg-rose-600 text-[10px] text-white font-bold animate-pulse">
+          <span className="ml-1 px-1.5 py-0.2 rounded-full bg-rose-600 text-[10px] text-white font-bold tabular-nums animate-pulse">
             {unreadChatCount}
           </span>
         )}
@@ -1004,7 +1046,7 @@ export default function App() {
         <Film className="w-3.5 h-3.5" />
         <span>Плейлист</span>
         {roomState?.playlist.length ? (
-          <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-700 text-neutral-300">
+          <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-700 text-neutral-300 tabular-nums">
             {roomState.playlist.length}
           </span>
         ) : null}
@@ -1020,7 +1062,7 @@ export default function App() {
       >
         <Users className="w-3.5 h-3.5" />
         <span>Люди</span>
-        <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-700 text-neutral-300">
+        <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-700 text-neutral-300 tabular-nums">
           {userCount}
         </span>
       </button>
@@ -1101,6 +1143,10 @@ export default function App() {
         nickname={nickname}
         userCount={userCount}
         isConnected={isConnected}
+        uiTheme={uiTheme}
+        onChangeUiTheme={setUiTheme}
+        ambilightEnabled={ambilightEnabled}
+        onToggleAmbilight={setAmbilightEnabled}
         onChangeNickname={handleChangeNickname}
         onLeaveRoom={handleLeaveRoom}
         onCloseRoom={handleCloseRoom}
@@ -1157,6 +1203,7 @@ export default function App() {
             danmakuItems={danmakuItems}
             floatingEmojis={floatingEmojis}
             isTheaterMode={isPortraitMode ? undefined : isTheaterMode}
+            ambilightEnabled={ambilightEnabled}
             onPlay={handlePlay}
             onPause={handlePause}
             onSeek={handleSeek}
