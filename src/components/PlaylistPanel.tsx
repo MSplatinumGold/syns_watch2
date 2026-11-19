@@ -46,6 +46,9 @@ interface PlaylistPanelProps {
   roomId: string;
   hostToken: string;
   socketId: string;
+  localTrackUrls?: Record<string, string>;
+  onRegisterLocalTrack?: (fileId: string, file: File) => void;
+  onRevokeLocalTrack?: (fileId: string) => void;
   onChangeTrack: (index: number) => void;
   onReorder: (newOrderIds: string[]) => void;
   onDeleteTrack: (fileId: string) => void;
@@ -65,6 +68,9 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   roomId,
   hostToken,
   socketId,
+  localTrackUrls,
+  onRegisterLocalTrack,
+  onRevokeLocalTrack,
   onChangeTrack,
   onReorder,
   onDeleteTrack,
@@ -365,6 +371,8 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       chunkLoadedMapRef.current.clear();
       speedTrackerRef.current = { lastTime: Date.now(), lastTotalBytes: 0 };
 
+      onRegisterLocalTrack?.(fileId, file);
+
       setUpload({
         file,
         fileId,
@@ -382,7 +390,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       const allChunks = Array.from({ length: totalChunks }, (_, i) => i);
       uploadChunkLoop(file, fileId, allChunks);
     },
-    [emitRoomUploadProgress, uploadChunkLoop]
+    [emitRoomUploadProgress, uploadChunkLoop, onRegisterLocalTrack]
   );
 
   startUploadForFileRef.current = startUploadForFile;
@@ -417,16 +425,35 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // Retry failed upload
-  const handleRetryUpload = () => {
+  // Retry failed upload (syncs server chunk status first to avoid re-uploading already received chunks)
+  const handleRetryUpload = async () => {
     if (!upload) return;
     isCancelledRef.current = false;
     setUpload((prev) =>
       prev ? { ...prev, status: 'uploading', errorMessage: null } : null
     );
+
+    try {
+      const statusRes = await fetch(`/api/rooms/${roomId}/upload/status/${upload.fileId}`);
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        if (statusData.completed) {
+          emitRoomUploadProgress(upload.fileId, upload.file.name, 100, 'completed', true);
+          onClearUploadProgress?.(upload.fileId);
+          setUpload(null);
+          return;
+        }
+        if (Array.isArray(statusData.completedChunks)) {
+          for (const idx of statusData.completedChunks) {
+            if (typeof idx === 'number') completedChunksSetRef.current.add(idx);
+          }
+        }
+      }
+    } catch {}
+
     const currentPercent =
       upload.totalBytes > 0
-        ? Math.min(99, Math.round((upload.uploadedBytes / upload.totalBytes) * 100))
+        ? Math.min(99, Math.round(((completedChunksSetRef.current.size * CHUNK_SIZE) / upload.totalBytes) * 100))
         : 0;
     emitRoomUploadProgress(upload.fileId, upload.file.name, currentPercent, 'uploading', true);
 
@@ -464,6 +491,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     setUpload(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (currentFileId) {
+      onRevokeLocalTrack?.(currentFileId);
       onClearUploadProgress?.(currentFileId);
     }
 
@@ -729,9 +757,19 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                     >
                       {item.originalName}
                     </p>
-                    <p className="text-[10px] text-neutral-500 font-mono mt-0.5">
-                      {formatBytes(item.size)}
-                    </p>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <p className="text-[10px] text-neutral-500 font-mono">
+                        {formatBytes(item.size)}
+                      </p>
+                      {localTrackUrls?.[item.id] && (
+                        <span
+                          className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-medium"
+                          title="Воспроизводится с вашего устройства без скачивания с сервера"
+                        >
+                          Локально
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
 

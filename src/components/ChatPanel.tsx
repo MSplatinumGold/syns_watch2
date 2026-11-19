@@ -22,9 +22,55 @@ import {
 import type { ChatMessage, ChatReplyRef, RoomUploadProgress, User } from '../types/watchparty.ts';
 import { formatBytes, parseTime } from '../utils/format.ts';
 import { STICKER_PACKS } from '../utils/stickers.ts';
+import {
+  compressImageForChat,
+  fetchAndCacheChatImage,
+  getCachedChatMediaUrl,
+  registerLocalChatMedia,
+} from '../utils/mediaCache.ts';
 import { StickerAsset } from './StickerAsset.tsx';
 
 const MAX_CHAT_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB limit per file
+
+const CachedChatImage: React.FC<{
+  src: string;
+  alt: string;
+  className?: string;
+  onOpenLightbox: (resolvedUrl: string) => void;
+}> = ({ src, alt, className, onOpenLightbox }) => {
+  const [resolvedSrc, setResolvedSrc] = useState<string>(() => getCachedChatMediaUrl(src) || src);
+
+  useEffect(() => {
+    const cached = getCachedChatMediaUrl(src);
+    if (cached) {
+      setResolvedSrc(cached);
+      return;
+    }
+    setResolvedSrc(src);
+    let cancelled = false;
+    fetchAndCacheChatImage(src).then((blobUrl) => {
+      if (!cancelled && blobUrl) {
+        setResolvedSrc(blobUrl);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+
+  return (
+    <img
+      src={resolvedSrc}
+      alt={alt}
+      loading="lazy"
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpenLightbox(getCachedChatMediaUrl(src) || resolvedSrc);
+      }}
+      className={className}
+    />
+  );
+};
 
 const CUTE_QUICK_ACTIONS = [
   { label: '💋 Поцеловать', word: 'поцеловать' },
@@ -74,6 +120,7 @@ interface ChatPanelProps {
   onTypingChange?: (isTyping: boolean) => void;
   onSendFloatingEmoji?: (emoji: string) => void;
   onSeekToTimecode?: (seconds: number) => void;
+  onLocalMediaMessageSent?: (message: ChatMessage) => void;
 }
 
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
@@ -94,6 +141,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onTypingChange,
   onSendFloatingEmoji,
   onSeekToTimecode,
+  onLocalMediaMessageSent,
 }) => {
   const [text, setText] = useState('');
   const [showStickerPicker, setShowStickerPicker] = useState(false);
@@ -315,8 +363,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       setIsUploadingMedia(true);
       setMediaError(null);
       try {
+        const fileToUpload = await compressImageForChat(pendingFile);
         const formData = new FormData();
-        formData.append('media', pendingFile);
+        formData.append('media', fileToUpload);
         if (clean) {
           formData.append('text', clean);
         }
@@ -335,6 +384,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           throw new Error(data.error || 'Не удалось загрузить медиафайл');
+        }
+
+        if (data.message?.media?.url) {
+          registerLocalChatMedia(data.message.media.url, fileToUpload);
+        }
+        if (data.message && onLocalMediaMessageSent) {
+          onLocalMediaMessageSent(data.message);
         }
 
         setPendingFile(null);
@@ -736,27 +792,25 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                       </div>
                     )}
 
-                    {msg.media && (
+                    {msg.media && (() => {
+                      const localMediaSrc = getCachedChatMediaUrl(msg.media.url) || msg.media.url;
+                      return (
                       <div>
-                        {msg.media.expired ? (
+                        {msg.media.expired && !getCachedChatMediaUrl(msg.media.url) ? (
                           <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-black/25 text-[11px] text-neutral-300/80 italic">
                             <Trash2 className="w-3.5 h-3.5 shrink-0" />
                             <span>Медиа удалено (превышен лимит 100 МБ комнаты)</span>
                           </div>
                         ) : msg.media.mediaKind === 'image' ? (
-                          <img
+                          <CachedChatImage
                             src={msg.media.url}
                             alt={msg.media.originalName}
-                            loading="lazy"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setLightboxImageUrl(msg.media!.url);
-                            }}
+                            onOpenLightbox={(resolvedUrl) => setLightboxImageUrl(resolvedUrl)}
                             className="max-h-60 w-auto max-w-full rounded-xl object-contain bg-black/30 cursor-pointer hover:opacity-95 transition"
                           />
                         ) : msg.media.mediaKind === 'video' ? (
                           <video
-                            src={msg.media.url}
+                            src={localMediaSrc}
                             controls
                             playsInline
                             preload="metadata"
@@ -765,21 +819,22 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                           />
                         ) : (
                           <audio
-                            src={msg.media.url}
+                            src={localMediaSrc}
                             controls
                             preload="metadata"
                             onClick={(e) => e.stopPropagation()}
                             className="w-full max-w-[250px]"
                           />
                         )}
-                        {!msg.media.expired && (
+                        {(!msg.media.expired || Boolean(getCachedChatMediaUrl(msg.media.url))) && (
                           <div className="mt-1 flex items-center justify-between gap-2 text-[10px] opacity-75 font-mono">
                             <span className="truncate">{msg.media.originalName}</span>
                             <span className="shrink-0">{formatBytes(msg.media.size)}</span>
                           </div>
                         )}
                       </div>
-                    )}
+                      );
+                    })()}
 
                     {msg.text && <p>{renderMessageTextWithTimecodes(msg.text, isMe)}</p>}
                   </div>
