@@ -1,21 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import {
-  Copy,
-  Check,
-  Users,
-  LogOut,
-  Radio,
-  Settings,
-  X,
-  Trash2,
-  Mic,
-  MessageSquare,
-  Volume2,
-  Headphones,
-  Square,
-} from 'lucide-react';
+import { Film, Copy, Check, Users, Crown, LogOut, Radio, Settings, X, Trash2 } from 'lucide-react';
 import { copyToClipboard } from '../utils/format.ts';
-import type { VoiceMode } from '../types/watchparty.ts';
 
 interface NavbarProps {
   roomId: string;
@@ -23,22 +8,6 @@ interface NavbarProps {
   nickname: string;
   userCount: number;
   isConnected: boolean;
-  voiceMode: VoiceMode;
-  isMicOn: boolean;
-  isSelfSpeaking: boolean;
-  voiceVolumePercent: number;
-  voicePriorityRatio: number; // 0 = 100:0 (Video:Voice), 50 = 50:50, 67 = default (33:67), 100 = 0:100
-  selfDuckPercent: number; // 0..100, default 30 (video drops to 30% when speaking)
-  isMicTestActive: boolean;
-  micTestLevel: number;
-  isPeerSimActive: boolean;
-  voiceError?: string | null;
-  onToggleMicTest: () => void;
-  onTogglePeerSim: () => void;
-  onSwitchVoiceMode: (mode: VoiceMode) => void;
-  onChangeVoiceVolume: (val: number) => void;
-  onChangeVoicePriority: (val: number) => void;
-  onChangeSelfDuckPercent: (val: number) => void;
   onChangeNickname: (newNickname: string) => void;
   onLeaveRoom: () => void;
   onCloseRoom: () => void;
@@ -50,22 +19,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   nickname,
   userCount,
   isConnected,
-  voiceMode,
-  isMicOn,
-  isSelfSpeaking,
-  voiceVolumePercent,
-  voicePriorityRatio,
-  selfDuckPercent,
-  isMicTestActive,
-  micTestLevel,
-  isPeerSimActive,
-  voiceError = null,
-  onToggleMicTest,
-  onTogglePeerSim,
-  onSwitchVoiceMode,
-  onChangeVoiceVolume,
-  onChangeVoicePriority,
-  onChangeSelfDuckPercent,
   onChangeNickname,
   onLeaveRoom,
   onCloseRoom,
@@ -121,53 +74,23 @@ export const Navbar: React.FC<NavbarProps> = ({
     onCloseRoom();
   };
 
-  const videoPriorityPart = 100 - voicePriorityRatio;
-  const voicePriorityPart = voicePriorityRatio;
-
   return (
-    <header className="h-12 md:h-14 border-b border-neutral-800 bg-neutral-950/90 backdrop-blur-md px-2.5 md:px-4 flex items-center justify-between gap-2 shrink-0 z-30">
-      {/* Left: Voice / Text Chat Mode Toggle (replaces site logo) */}
-      <div className="flex items-center shrink-0">
-        <button
-          type="button"
-          onClick={() => onSwitchVoiceMode(voiceMode === 'text' ? 'voice' : 'text')}
-          className={`px-2.5 py-1.5 rounded-lg border text-[11px] sm:text-xs font-medium transition cursor-pointer flex items-center gap-1.5 ${
-            voiceMode === 'voice'
-              ? 'bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/40 text-emerald-300'
-              : 'bg-neutral-900 hover:bg-neutral-800 border-neutral-800 text-neutral-200 hover:text-white'
-          }`}
-          title={
-            voiceMode === 'text'
-              ? 'Переключиться в голосовой чат'
-              : 'Вернуться в текстовый чат (микрофон выключится)'
-          }
-        >
-          {voiceMode === 'text' ? (
-            <>
-              <Mic className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span>Голосовой чат</span>
-            </>
-          ) : (
-            <>
-              <MessageSquare className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-              <span>Текстовый чат</span>
-              {isMicOn && (
-                <span
-                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                    isSelfSpeaking ? 'bg-emerald-400 animate-ping' : 'bg-emerald-400'
-                  }`}
-                />
-              )}
-            </>
-          )}
-        </button>
+    <header className="h-12 md:h-14 border-b border-neutral-800 bg-neutral-950/90 backdrop-blur-md px-3 md:px-4 flex items-center justify-between shrink-0 z-30">
+      {/* Brand */}
+      <div className="flex items-center gap-2">
+        <div className="w-7 h-7 md:w-8 md:h-8 rounded-xl bg-gradient-to-tr from-rose-600 to-amber-500 flex items-center justify-center text-white shadow-md shadow-rose-600/20 shrink-0">
+          <Film className="w-3.5 h-3.5 md:w-4 md:h-4" />
+        </div>
+        <span className="font-bold text-white text-xs md:text-sm tracking-tight hidden sm:inline">
+          SyncWatch
+        </span>
       </div>
 
       {/* Center: Room Code Pill & Share */}
-      <div className="flex items-center gap-1.5 min-w-0">
+      <div className="flex items-center gap-1.5">
         <div className="flex items-center bg-neutral-900 border border-neutral-800 rounded-full pl-2.5 pr-1 py-0.5 md:py-1">
           <div className="flex items-center gap-1.5 text-xs font-mono text-neutral-300">
-            <Radio className={`w-3 h-3 shrink-0 ${isConnected ? 'text-rose-500 animate-pulse' : 'text-neutral-500'}`} />
+            <Radio className={`w-3 h-3 ${isConnected ? 'text-rose-500 animate-pulse' : 'text-neutral-500'}`} />
             <span className="text-neutral-500 hidden sm:inline">ID:</span>
             <strong className="text-white tracking-wider uppercase text-[11px] md:text-xs">{roomId}</strong>
           </div>
@@ -185,13 +108,27 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
       </div>
 
-      {/* Right: Online Count & Settings Menu (no nickname or crown in header) */}
-      <div className="flex items-center gap-2 shrink-0">
+      {/* Right: User Info & Settings Button */}
+      <div className="flex items-center gap-2">
+        {/* Role Badge */}
+        <div
+          className={`px-2 py-0.5 md:py-1 rounded-full text-xs font-semibold flex items-center gap-1 ${
+            isHost
+              ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+              : 'bg-neutral-800 text-neutral-300 border border-neutral-700/60'
+          }`}
+        >
+          {isHost && <Crown className="w-3 h-3 fill-amber-400 text-amber-400 shrink-0" />}
+          <span className="truncate max-w-[70px] sm:max-w-[110px]">{nickname}</span>
+        </div>
+
+        {/* Online Count */}
         <div className="hidden md:flex items-center gap-1.5 px-2 py-0.5 md:py-1 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-400">
           <Users className="w-3.5 h-3.5 text-emerald-400" />
           <span className="font-mono text-white text-[11px]">{userCount}</span>
         </div>
 
+        {/* Settings Menu (replaces Exit/Close button) */}
         <div className="relative" ref={settingsRef}>
           <button
             onClick={() => {
@@ -210,7 +147,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
 
           {showSettings && (
-            <div className="absolute right-0 top-full mt-2 w-80 max-w-[calc(100vw-1.5rem)] max-h-[82vh] overflow-y-auto p-3.5 bg-neutral-900 border border-neutral-700/80 rounded-2xl shadow-2xl z-50 text-left space-y-3.5">
+            <div className="absolute right-0 top-full mt-2 w-72 p-3.5 bg-neutral-900 border border-neutral-700/80 rounded-2xl shadow-2xl z-50 text-left space-y-3.5">
               <div className="flex items-center justify-between pb-2 border-b border-neutral-800">
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-white">
                   <Settings className="w-3.5 h-3.5 text-rose-400" />
@@ -254,161 +191,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                   </button>
                 </div>
               </form>
-
-              {/* Voice Chat Audio & Ducking Priority Settings */}
-              <div className="pt-2.5 border-t border-neutral-800 space-y-3">
-                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-300">
-                  <Volume2 className="w-3.5 h-3.5 shrink-0" />
-                  <span>Звук голосового чата</span>
-                </div>
-
-                {/* Global Voice Volume Boost 0..200% */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-neutral-300">Громкость собеседников</span>
-                    <span className="font-mono font-semibold text-emerald-400">
-                      {voiceVolumePercent}%
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={200}
-                    step={5}
-                    value={voiceVolumePercent}
-                    onChange={(e) => onChangeVoiceVolume(Number(e.target.value))}
-                    className="w-full accent-emerald-500 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
-                  />
-                </div>
-
-                {/* Speaking Priority Ratio: 100:0 (Video) <-> 50:50 <-> 0:100 (Voice) */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-neutral-300">Приоритет при речи друзей</span>
-                    <span className="font-mono font-semibold text-amber-300">
-                      {videoPriorityPart}:{voicePriorityPart}
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    step={1}
-                    value={voicePriorityRatio}
-                    onChange={(e) => onChangeVoicePriority(Number(e.target.value))}
-                    className="w-full accent-amber-500 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
-                  />
-                  <div className="flex items-center justify-between text-[10px] text-neutral-500">
-                    <span>100:0 Видео</span>
-                    <button
-                      type="button"
-                      onClick={() => onChangeVoicePriority(67)}
-                      className="text-neutral-400 hover:text-amber-300 underline cursor-pointer"
-                    >
-                      Сброс (33:67)
-                    </button>
-                    <span>0:100 Голос</span>
-                  </div>
-                  <p className="text-[10px] text-neutral-500 leading-snug">
-                    Срабатывает только во время речи собеседников. По умолчанию видео становится тише голоса на треть.
-                  </p>
-                </div>
-
-                {/* Self Speaking Video Ducking (default 30%) */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-neutral-300">Видео, когда говорите вы</span>
-                    <span className="font-mono font-semibold text-rose-300">
-                      до {selfDuckPercent}%
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    step={5}
-                    value={selfDuckPercent}
-                    onChange={(e) => onChangeSelfDuckPercent(Number(e.target.value))}
-                    className="w-full accent-rose-500 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
-                  />
-                </div>
-
-                {/* Debug Voice Test Buttons */}
-                <div className="pt-2 border-t border-neutral-800/70 space-y-2">
-                  <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-neutral-400 font-semibold">
-                    <span>Debug: тест голоса</span>
-                    {(isMicTestActive || isPeerSimActive) && (
-                      <span className="text-emerald-400 animate-pulse">Активен</span>
-                    )}
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <button
-                      type="button"
-                      onClick={onToggleMicTest}
-                      className={`px-2 py-1.5 rounded-lg border text-[11px] font-medium transition cursor-pointer flex items-center justify-center gap-1 ${
-                        isMicTestActive
-                          ? 'bg-emerald-600/25 border-emerald-500/60 text-emerald-200'
-                          : 'bg-neutral-800 hover:bg-neutral-700 border-neutral-700 text-neutral-200'
-                      }`}
-                      title="Включить петлю микрофона (услышать свой голос с задержкой 0.18с)"
-                    >
-                      {isMicTestActive ? (
-                        <>
-                          <Square className="w-3 h-3 fill-emerald-400 text-emerald-400 shrink-0" />
-                          <span>Стоп микро</span>
-                        </>
-                      ) : (
-                        <>
-                          <Mic className="w-3 h-3 text-emerald-400 shrink-0" />
-                          <span>Тест микро</span>
-                        </>
-                      )}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={onTogglePeerSim}
-                      className={`px-2 py-1.5 rounded-lg border text-[11px] font-medium transition cursor-pointer flex items-center justify-center gap-1 ${
-                        isPeerSimActive
-                          ? 'bg-amber-500/25 border-amber-400/60 text-amber-200'
-                          : 'bg-neutral-800 hover:bg-neutral-700 border-neutral-700 text-neutral-200'
-                      }`}
-                      title="Имитация речи собеседника для проверки громкости и приглушения видео"
-                    >
-                      {isPeerSimActive ? (
-                        <>
-                          <Square className="w-3 h-3 fill-amber-400 text-amber-400 shrink-0" />
-                          <span>Стоп тест</span>
-                        </>
-                      ) : (
-                        <>
-                          <Headphones className="w-3 h-3 text-amber-400 shrink-0" />
-                          <span>Собеседник</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-
-                  {isMicTestActive && (
-                    <div className="space-y-1">
-                      <div className="h-1.5 w-full bg-neutral-950 rounded-full overflow-hidden border border-neutral-800">
-                        <div
-                          className="h-full bg-gradient-to-r from-emerald-500 to-amber-400 transition-all duration-75"
-                          style={{ width: `${micTestLevel}%` }}
-                        />
-                      </div>
-                      <p className="text-[10px] text-emerald-300/90">
-                        Вы слышите свой голос через усиление {voiceVolumePercent}%.
-                      </p>
-                    </div>
-                  )}
-
-                  {voiceError && (
-                    <p className="text-[10px] text-amber-300 leading-snug">{voiceError}</p>
-                  )}
-                </div>
-              </div>
 
               <div className="pt-2 border-t border-neutral-800 space-y-2">
                 {/* Leave Room (available for any user) */}
@@ -465,4 +247,3 @@ export const Navbar: React.FC<NavbarProps> = ({
     </header>
   );
 };
-

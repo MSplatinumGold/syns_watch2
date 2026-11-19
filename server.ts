@@ -1289,7 +1289,7 @@ app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
       'Accept-Ranges': 'bytes',
       'Content-Length': chunksize,
       'Content-Type': mimeType,
-      'Cache-Control': 'private, no-cache, no-transform',
+      'Cache-Control': 'public, max-age=86400, no-transform',
     });
 
     req.on('close', () => fileStream.destroy());
@@ -1299,7 +1299,7 @@ app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
       'Content-Length': fileSize,
       'Content-Type': mimeType,
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'private, no-cache, no-transform',
+      'Cache-Control': 'public, max-age=86400, no-transform',
     });
     const fileStream = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
     req.on('close', () => fileStream.destroy());
@@ -1374,7 +1374,7 @@ app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
       'Accept-Ranges': 'bytes',
       'Content-Length': chunksize,
       'Content-Type': mimeType,
-      'Cache-Control': 'private, no-cache, no-transform',
+      'Cache-Control': 'public, max-age=86400, no-transform',
       'X-Content-Type-Options': 'nosniff',
     });
 
@@ -1389,7 +1389,7 @@ app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
       'Content-Length': fileSize,
       'Content-Type': mimeType,
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'private, no-cache, no-transform',
+      'Cache-Control': 'public, max-age=86400, no-transform',
     });
 
     const fileStream = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
@@ -1398,33 +1398,6 @@ app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
     });
     fileStream.pipe(res);
   }
-});
-
-// WebRTC ICE servers config (free public STUN + optional external TURN via env vars; zero server media load)
-app.get('/api/voice/ice-servers', (_req, res) => {
-  const iceServers: RTCIceServer[] = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
-  ];
-
-  const rawTurnUrls = (process.env.TURN_URLS || process.env.TURN_URL || '').trim();
-  const turnUrls = rawTurnUrls
-    .split(',')
-    .map((u) => u.trim())
-    .filter(Boolean);
-
-  if (turnUrls.length > 0) {
-    const turnEntry: RTCIceServer = { urls: turnUrls.length === 1 ? turnUrls[0] : turnUrls };
-    if (process.env.TURN_USERNAME) turnEntry.username = process.env.TURN_USERNAME;
-    if (process.env.TURN_CREDENTIAL) turnEntry.credential = process.env.TURN_CREDENTIAL;
-    iceServers.push(turnEntry);
-  }
-
-  res.json({
-    iceServers,
-    hasTurn: turnUrls.length > 0,
-  });
 });
 
 // -----------------------------------------------------------------------------
@@ -1504,9 +1477,6 @@ io.on('connection', (socket) => {
       isHost: room.hostId === socket.id,
       isBuffering: false,
       joinedAt: Date.now(),
-      voiceMode: 'text',
-      isMicOn: false,
-      isSpeaking: false,
     };
 
     room.users[socket.id] = newUser;
@@ -2068,53 +2038,6 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Voice chat mode / mic / speaking status (state-change only, zero audio payload on server)
-  socket.on('voice:state', ({ mode, isMicOn, isSpeaking }) => {
-    if (!currentRoomId) return;
-    const room = rooms.get(currentRoomId);
-    if (!room) return;
-    const user = room.users[socket.id];
-    if (!user) return;
-
-    const cleanMode = mode === 'voice' ? 'voice' : 'text';
-    const cleanMicOn = cleanMode === 'voice' && Boolean(isMicOn);
-    const cleanSpeaking = cleanMicOn && Boolean(isSpeaking);
-
-    if (
-      user.voiceMode === cleanMode &&
-      Boolean(user.isMicOn) === cleanMicOn &&
-      Boolean(user.isSpeaking) === cleanSpeaking
-    ) {
-      return;
-    }
-
-    user.voiceMode = cleanMode;
-    user.isMicOn = cleanMicOn;
-    user.isSpeaking = cleanSpeaking;
-
-    io.to(currentRoomId).emit('voice:user_state', {
-      userId: socket.id,
-      mode: cleanMode,
-      isMicOn: cleanMicOn,
-      isSpeaking: cleanSpeaking,
-    });
-  });
-
-  // Targeted WebRTC 1-to-1 signaling relay (strictly within the same room)
-  socket.on('voice:signal', ({ targetUserId, type, sdp, candidate }) => {
-    if (!currentRoomId || typeof targetUserId !== 'string' || targetUserId === socket.id) return;
-    const room = rooms.get(currentRoomId);
-    if (!room || !room.users[socket.id] || !room.users[targetUserId]) return;
-    if (type !== 'offer' && type !== 'answer' && type !== 'ice-candidate') return;
-
-    io.to(targetUserId).emit('voice:signal', {
-      fromUserId: socket.id,
-      type,
-      sdp,
-      candidate,
-    });
-  });
-
   // Disconnect & Auto Host Migration
   socket.on('disconnect', () => {
     if (!currentRoomId) return;
@@ -2235,17 +2158,8 @@ async function startServer() {
         `[WatchParty Server] ОШИБКА: Файл ${path.join(distPath, 'index.html')} не найден! Убедитесь, что в Build Command выполняется "npm run build".`
       );
     }
-    app.use(
-      express.static(distPath, {
-        etag: true,
-        lastModified: true,
-        setHeaders: (res) => {
-          res.setHeader('Cache-Control', 'no-cache');
-        },
-      })
-    );
+    app.use(express.static(distPath));
     app.get('*', (_req, res) => {
-      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
