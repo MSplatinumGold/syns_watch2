@@ -14,9 +14,11 @@ import type {
   DanmakuItem,
   FloatingEmojiItem,
   RoomUploadProgress,
+  VoiceMode,
   ClientToServerEvents,
   ServerToClientEvents,
 } from './types/watchparty.ts';
+import { useVoiceChat } from './hooks/useVoiceChat.ts';
 import { Navbar } from './components/Navbar.tsx';
 import { VideoPlayer } from './components/VideoPlayer.tsx';
 import { ChatPanel } from './components/ChatPanel.tsx';
@@ -54,9 +56,18 @@ export default function App() {
   const [bufferingUsers, setBufferingUsers] = useState<string[]>([]);
   const [roomUploadProgress, setRoomUploadProgress] = useState<RoomUploadProgress | null>(null);
 
+  const [socketInstance, setSocketInstance] = useState<Socket<
+    ServerToClientEvents,
+    ClientToServerEvents
+  > | null>(null);
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
   const nicknameRef = useRef<string>('');
   nicknameRef.current = nickname;
+
+  // Voice chat audio & ducking preferences
+  const [voiceVolumePercent, setVoiceVolumePercent] = useState<number>(100);
+  const [voicePriorityRatio, setVoicePriorityRatio] = useState<number>(67); // 33:67 default -> video is ~1/3 quieter than voice
+  const [selfDuckPercent, setSelfDuckPercent] = useState<number>(30); // default 30% when user speaks
 
   // Check initial query parameter ?room=...
   const [initialUrlRoomId, setInitialUrlRoomId] = useState<string | undefined>(undefined);
@@ -233,6 +244,7 @@ export default function App() {
     });
 
     socketRef.current = socket;
+    setSocketInstance(socket);
 
     let pingTimeouts: ReturnType<typeof setTimeout>[] = [];
     let pingInterval: ReturnType<typeof setInterval> | null = null;
@@ -615,6 +627,25 @@ export default function App() {
       );
     });
 
+    // Voice chat user state updates (text/voice mode, mic, speaking)
+    socket.on('voice:user_state', ({ userId, mode, isMicOn, isSpeaking }) => {
+      setRoomState((prev) => {
+        if (!prev || !prev.users[userId]) return prev;
+        return {
+          ...prev,
+          users: {
+            ...prev.users,
+            [userId]: {
+              ...prev.users[userId],
+              voiceMode: mode,
+              isMicOn,
+              isSpeaking,
+            },
+          },
+        };
+      });
+    });
+
     // Server error notification
     socket.on('error:notification', ({ message }) => {
       if (message) showAppNotice(message, 'error');
@@ -633,6 +664,7 @@ export default function App() {
       clearOverlayTimers();
       socket.disconnect();
       socketRef.current = null;
+      setSocketInstance(null);
     };
   }, [roomId, hasNickname, hostToken, showAppNotice, clearOverlayTimers]);
 
@@ -835,6 +867,75 @@ export default function App() {
     socketRef.current?.emit('user:set_prefix', { targetUserId, prefix });
   }, []);
 
+  // Compute live speaking state and ducking priority before initializing WebRTC voice hook
+  const roomUsersMap = roomState?.users || {};
+  const speakingRemoteUsers = Object.values(roomUsersMap).filter(
+    (u) => u.id !== socketId && Boolean(u.isSpeaking)
+  );
+  // Voice ducking multiplier when priority < 50 (Video priority over voice during speech)
+  const [mutedLookup, setMutedLookup] = useState<Record<string, boolean>>({});
+  const [peerVolLookup, setPeerVolLookup] = useState<Record<string, number>>({});
+  const unmutedRemoteSpeaking = speakingRemoteUsers.filter(
+    (u) => !mutedLookup[u.id] && (peerVolLookup[u.id] ?? 100) > 0
+  );
+
+  const duckWhenPeerSpeaking =
+    voicePriorityRatio < 50 ? Math.max(0, Math.min(1, voicePriorityRatio / 50)) : 1;
+
+  const voice = useVoiceChat({
+    socket: socketInstance,
+    roomId,
+    currentUserId: socketId,
+    users: roomUsersMap,
+    voiceVolumePercent,
+    voiceDuckMultiplier: unmutedRemoteSpeaking.length > 0 ? duckWhenPeerSpeaking : 1,
+    voiceDuckWhenSpeaking: duckWhenPeerSpeaking,
+  });
+
+  useEffect(() => {
+    setMutedLookup(voice.mutedPeerIds);
+  }, [voice.mutedPeerIds]);
+
+  useEffect(() => {
+    setPeerVolLookup(voice.peerVolumes);
+  }, [voice.peerVolumes]);
+
+  const isSomeoneElseSpeaking = unmutedRemoteSpeaking.length > 0 || voice.isPeerSimActive;
+  const isSelfActiveSpeaking = voice.isSelfSpeaking || voice.isMicTestSpeaking;
+
+  const othersVideoDuckMultiplier =
+    isSomeoneElseSpeaking && voicePriorityRatio > 50
+      ? Math.max(0, Math.min(1, (100 - voicePriorityRatio) / 50))
+      : 1;
+  const selfVideoDuckMultiplier = isSelfActiveSpeaking
+    ? Math.max(0, Math.min(1, selfDuckPercent / 100))
+    : 1;
+  const videoDuckMultiplier = Math.min(othersVideoDuckMultiplier, selfVideoDuckMultiplier);
+
+  const speakingNicknames: string[] = [];
+  if (isSelfActiveSpeaking && nickname) {
+    speakingNicknames.push(nickname);
+  }
+  unmutedRemoteSpeaking.forEach((u) => {
+    if (u.nickname && !speakingNicknames.includes(u.nickname)) {
+      speakingNicknames.push(u.nickname);
+    }
+  });
+  if (voice.isPeerSimActive) {
+    speakingNicknames.push('Тест (собеседник)');
+  }
+
+  const handleSwitchVoiceMode = useCallback(
+    (nextMode: VoiceMode) => {
+      voice.switchVoiceMode(nextMode);
+      if (nextMode === 'voice') {
+        setActiveTab('chat');
+        setUnreadChatCount(0);
+      }
+    },
+    [voice]
+  );
+
   const NoticeBanner = appNotice ? (
     <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] max-w-md w-[calc(100%-2rem)]">
       <div
@@ -952,6 +1053,16 @@ export default function App() {
           isKeyboardOpen={isKeyboardOpen}
           typingNicknames={Object.values(typingUsers)}
           roomUploadProgress={roomUploadProgress}
+          voiceMode={voice.voiceMode}
+          isMicOn={voice.isMicOn}
+          isSelfSpeaking={isSelfActiveSpeaking}
+          speakingNicknames={speakingNicknames}
+          voiceError={voice.voiceError}
+          audioAutoplayBlocked={voice.audioAutoplayBlocked}
+          onToggleMic={voice.toggleMic}
+          onSwitchVoiceMode={handleSwitchVoiceMode}
+          onClearVoiceError={voice.clearVoiceError}
+          onUnlockVoiceAudio={voice.unlockVoiceAudio}
           onSendMessage={handleSendMessage}
           onEditMessage={handleEditMessage}
           onDeleteMessage={handleDeleteMessage}
@@ -985,6 +1096,13 @@ export default function App() {
           isHost={isHost}
           roomId={roomId}
           hostCurrentTime={roomState?.playbackState.currentTime || 0}
+          isSelfSpeaking={isSelfActiveSpeaking}
+          peerStates={voice.peerStates}
+          mutedPeerIds={voice.mutedPeerIds}
+          peerVolumes={voice.peerVolumes}
+          hasTurn={voice.hasTurn}
+          onTogglePeerMute={voice.togglePeerMute}
+          onChangePeerVolume={voice.setPeerVolume}
           onTransferHost={handleTransferHost}
           onSetUserPrefix={handleSetUserPrefix}
         />
@@ -1006,6 +1124,22 @@ export default function App() {
         nickname={nickname}
         userCount={userCount}
         isConnected={isConnected}
+        voiceMode={voice.voiceMode}
+        isMicOn={voice.isMicOn}
+        isSelfSpeaking={isSelfActiveSpeaking}
+        voiceVolumePercent={voiceVolumePercent}
+        voicePriorityRatio={voicePriorityRatio}
+        selfDuckPercent={selfDuckPercent}
+        isMicTestActive={voice.isMicTestActive}
+        micTestLevel={voice.micTestLevel}
+        isPeerSimActive={voice.isPeerSimActive}
+        voiceError={voice.voiceError}
+        onToggleMicTest={voice.toggleMicTest}
+        onTogglePeerSim={voice.togglePeerSim}
+        onSwitchVoiceMode={handleSwitchVoiceMode}
+        onChangeVoiceVolume={setVoiceVolumePercent}
+        onChangeVoicePriority={setVoicePriorityRatio}
+        onChangeSelfDuckPercent={setSelfDuckPercent}
         onChangeNickname={handleChangeNickname}
         onLeaveRoom={handleLeaveRoom}
         onCloseRoom={handleCloseRoom}
@@ -1049,6 +1183,7 @@ export default function App() {
             currentTrackIndex={roomState?.currentTrackIndex || 0}
             isHost={isHost}
             clockOffsetMs={clockOffsetMs}
+            videoDuckMultiplier={videoDuckMultiplier}
             playbackState={
               roomState?.playbackState || {
                 isPlaying: false,

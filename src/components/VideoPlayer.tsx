@@ -40,6 +40,7 @@ interface VideoPlayerProps {
   floatingEmojis?: FloatingEmojiItem[];
   isTheaterMode?: boolean;
   clockOffsetMs?: number;
+  videoDuckMultiplier?: number;
   onPlay: (currentTime: number) => void;
   onPause: (currentTime: number) => void;
   onSeek: (targetTime: number) => void;
@@ -63,6 +64,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   floatingEmojis = [],
   isTheaterMode,
   clockOffsetMs = 0,
+  videoDuckMultiplier = 1,
   onPlay,
   onPause,
   onSeek,
@@ -581,12 +583,48 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }, 3500);
   };
 
+  const videoDuckRef = useRef(videoDuckMultiplier);
+  videoDuckRef.current = videoDuckMultiplier;
+
+  // Smoothly ramp video element volume when base volume or voice ducking changes
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const target = isMuted ? 0 : Math.max(0, Math.min(1, volume * videoDuckMultiplier));
+    video.muted = isMuted || target === 0;
+
+    const start = video.volume;
+    if (Math.abs(start - target) < 0.01) {
+      video.volume = target;
+      return;
+    }
+
+    let frameId = 0;
+    const durationMs = 180;
+    const startedAt = performance.now();
+
+    const step = (now: number) => {
+      const t = Math.min(1, (now - startedAt) / durationMs);
+      const eased = 1 - Math.pow(1 - t, 2);
+      if (videoRef.current) {
+        videoRef.current.volume = Math.max(0, Math.min(1, start + (target - start) * eased));
+      }
+      if (t < 1) {
+        frameId = requestAnimationFrame(step);
+      }
+    };
+
+    frameId = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frameId);
+  }, [volume, isMuted, videoDuckMultiplier, videoSourceUrl]);
+
   // Volume change
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
     setVolume(val);
     if (videoRef.current) {
-      videoRef.current.volume = val;
+      videoRef.current.volume = Math.max(0, Math.min(1, val * videoDuckRef.current));
       videoRef.current.muted = val === 0;
     }
     setIsMuted(val === 0);
@@ -600,7 +638,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     video.muted = nextMuted;
     if (!nextMuted && volume === 0) {
       setVolume(0.5);
-      video.volume = 0.5;
+      video.volume = Math.max(0, Math.min(1, 0.5 * videoDuckRef.current));
     }
   };
 
