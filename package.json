@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
-    "start": "node --max-old-space-size=384 ./node_modules/.bin/tsx server.ts",
+    "start": "node --max-old-space-size=384 ./node_modules/tsx/dist/cli.mjs server.ts --prod",
+    "tunnel": "cloudflared tunnel --url http://127.0.0.1:3000",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

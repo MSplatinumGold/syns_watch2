@@ -1,14 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { Film, Play, Users, Zap, Shield, Sparkles } from 'lucide-react';
+import { Play } from 'lucide-react';
+import { UI_THEMES, type UiThemeId } from '../utils/themes.ts';
 
 interface JoinModalProps {
   initialRoomId?: string;
+  uiTheme: UiThemeId;
+  onChangeUiTheme: (theme: UiThemeId) => void;
   onCreateRoom: (nickname: string) => void;
   onJoinRoom: (roomId: string, nickname: string) => void;
 }
 
 export const JoinModal: React.FC<JoinModalProps> = ({
   initialRoomId,
+  uiTheme,
+  onChangeUiTheme,
   onCreateRoom,
   onJoinRoom,
 }) => {
@@ -49,47 +54,14 @@ export const JoinModal: React.FC<JoinModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
-      <div className="relative w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-3xl p-6 md:p-8 shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+      <div className="relative w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-3xl p-6 md:p-7 shadow-2xl overflow-hidden">
         {/* Glow ambient background */}
         <div className="absolute -top-24 -left-24 w-48 h-48 bg-rose-600/20 rounded-full blur-3xl pointer-events-none" />
         <div className="absolute -bottom-24 -right-24 w-48 h-48 bg-amber-500/20 rounded-full blur-3xl pointer-events-none" />
 
-        {/* Brand Header */}
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-rose-600 to-amber-500 flex items-center justify-center text-white shadow-lg shadow-rose-500/25">
-            <Film className="w-6 h-6" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold text-white tracking-tight">SyncWatch Party</h1>
-            <p className="text-xs text-neutral-400">Синхронный просмотр видео с друзьями</p>
-          </div>
-        </div>
-
-        {/* Feature Badges */}
-        <div className="grid grid-cols-3 gap-2 mb-6">
-          <div className="bg-neutral-800/60 border border-neutral-700/50 rounded-xl p-2.5 text-center">
-            <Zap className="w-4 h-4 text-amber-400 mx-auto mb-1" />
-            <span className="text-[10px] text-neutral-300 font-medium block">
-              Time Drift Sync
-            </span>
-          </div>
-          <div className="bg-neutral-800/60 border border-neutral-700/50 rounded-xl p-2.5 text-center">
-            <Shield className="w-4 h-4 text-emerald-400 mx-auto mb-1" />
-            <span className="text-[10px] text-neutral-300 font-medium block">
-              Smart Buffer
-            </span>
-          </div>
-          <div className="bg-neutral-800/60 border border-neutral-700/50 rounded-xl p-2.5 text-center">
-            <Sparkles className="w-4 h-4 text-rose-400 mx-auto mb-1" />
-            <span className="text-[10px] text-neutral-300 font-medium block">
-              Danmaku Чат
-            </span>
-          </div>
-        </div>
-
         {/* Tabs Switch */}
-        <div className="flex p-1 bg-neutral-950 rounded-xl mb-5 border border-neutral-800">
+        <div className="relative flex p-1 bg-neutral-950 rounded-xl mb-5 border border-neutral-800">
           <button
             type="button"
             onClick={() => {
@@ -121,7 +93,7 @@ export const JoinModal: React.FC<JoinModalProps> = ({
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="relative space-y-4">
           {activeTab === 'join' && (
             <div>
               <label className="block text-xs font-medium text-neutral-400 mb-1.5">
@@ -167,6 +139,38 @@ export const JoinModal: React.FC<JoinModalProps> = ({
             </span>
           </button>
         </form>
+      </div>
+
+      {/* Compact Theme Switcher below the card */}
+      <div className="mt-4 flex flex-wrap items-center justify-center gap-1.5 max-w-md">
+        {UI_THEMES.map((theme) => {
+          const isActive = uiTheme === theme.id;
+          return (
+            <button
+              key={theme.id}
+              type="button"
+              onClick={() => onChangeUiTheme(theme.id)}
+              title={theme.description}
+              className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                isActive
+                  ? 'bg-neutral-800 border-rose-500/60 text-white shadow'
+                  : 'bg-neutral-900/70 border-neutral-800 text-neutral-400 hover:text-neutral-200 hover:border-neutral-700'
+              }`}
+            >
+              <span className="flex items-center -space-x-1 shrink-0">
+                <span
+                  className="w-2.5 h-2.5 rounded-full border border-white/20"
+                  style={{ backgroundColor: theme.swatches[1] }}
+                />
+                <span
+                  className="w-2.5 h-2.5 rounded-full border border-white/20"
+                  style={{ backgroundColor: theme.swatches[2] }}
+                />
+              </span>
+              <span>{theme.name}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );

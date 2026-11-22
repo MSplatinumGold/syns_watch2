@@ -23,6 +23,15 @@ import { ChatPanel } from './components/ChatPanel.tsx';
 import { PlaylistPanel } from './components/PlaylistPanel.tsx';
 import { ParticipantsPanel } from './components/ParticipantsPanel.tsx';
 import { JoinModal } from './components/JoinModal.tsx';
+import { SiteMechanicsModal } from './components/SiteMechanicsModal.tsx';
+import { SpeedtestModal } from './components/SpeedtestModal.tsx';
+import {
+  clearAllSessionMediaCaches,
+  registerLocalTrackFile,
+  revokeLocalTrackUrl,
+} from './utils/mediaCache.ts';
+import { applyUiTheme, getSavedUiTheme, type UiThemeId } from './utils/themes.ts';
+import type { MechanicsTabId } from './utils/mechanics.ts';
 import {
   MessageSquare,
   Film,
@@ -53,8 +62,27 @@ export default function App() {
   const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
   const [bufferingUsers, setBufferingUsers] = useState<string[]>([]);
   const [roomUploadProgress, setRoomUploadProgress] = useState<RoomUploadProgress | null>(null);
+  const [localTrackUrls, setLocalTrackUrls] = useState<Record<string, string>>({});
+  const [uiTheme, setUiTheme] = useState<UiThemeId>(() => getSavedUiTheme());
+  const [ambilightEnabled, setAmbilightEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('watchparty_ambilight');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
+  const [mechanicsModal, setMechanicsModal] = useState<{ open: boolean; tab: MechanicsTabId }>({
+    open: false,
+    tab: 'player',
+  });
+  const [showSpeedtest, setShowSpeedtest] = useState(false);
 
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
+  const roomIdRef = useRef<string | null>(null);
+  roomIdRef.current = roomId;
+  const loadedChatRoomRef = useRef<string | null>(null);
+  const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const nicknameRef = useRef<string>('');
   nicknameRef.current = nickname;
 
@@ -79,6 +107,8 @@ export default function App() {
   const isResizingChatRef = useRef<boolean>(false);
   const danmakuTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const emojiTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const danmakuLaneExpiryRef = useRef<number[]>([0, 0, 0, 0]);
+  const danmakuNextLaneRef = useRef<number>(0);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showAppNotice = useCallback((text: string, type: 'error' | 'info' = 'info') => {
@@ -95,6 +125,60 @@ export default function App() {
     danmakuTimersRef.current.clear();
     emojiTimersRef.current.forEach(clearTimeout);
     emojiTimersRef.current.clear();
+  }, []);
+
+  // Load cached chat history from sessionStorage when entering a room (persists across F5 until tab/room closes)
+  useEffect(() => {
+    if (!roomId) {
+      loadedChatRoomRef.current = null;
+      seenMessageIdsRef.current.clear();
+      return;
+    }
+    try {
+      const raw = sessionStorage.getItem(`watchparty_chat_${roomId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const valid = parsed.filter(
+            (m): m is ChatMessage => Boolean(m && typeof m.id === 'string' && typeof m.timestamp === 'number')
+          ).slice(-250);
+          seenMessageIdsRef.current = new Set(valid.map((m) => m.id));
+          setMessages(valid);
+        }
+      } else {
+        seenMessageIdsRef.current.clear();
+      }
+    } catch {
+      seenMessageIdsRef.current.clear();
+    }
+    loadedChatRoomRef.current = roomId;
+  }, [roomId]);
+
+  // Persist chat history in sessionStorage for the current tab session
+  useEffect(() => {
+    if (!roomId || loadedChatRoomRef.current !== roomId) return;
+    try {
+      sessionStorage.setItem(`watchparty_chat_${roomId}`, JSON.stringify(messages.slice(-250)));
+    } catch {}
+  }, [messages, roomId]);
+
+  // Persist & apply selected UI theme
+  useEffect(() => {
+    applyUiTheme(uiTheme);
+  }, [uiTheme]);
+
+  // Persist Ambilight preference
+  useEffect(() => {
+    try {
+      localStorage.setItem('watchparty_ambilight', String(ambilightEnabled));
+    } catch {}
+  }, [ambilightEnabled]);
+
+  // Ensure session Blob URLs are released when App unmounts
+  useEffect(() => {
+    return () => {
+      clearAllSessionMediaCaches();
+    };
   }, []);
 
   useEffect(() => {
@@ -491,8 +575,15 @@ export default function App() {
 
     const typingTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
-    // Chat message received (capped at 250 messages in memory for smooth scrolling)
+    // Chat message received (deduplicated & capped at 250 messages in memory)
     socket.on('chat:message', (message: ChatMessage) => {
+      if (seenMessageIdsRef.current.has(message.id)) return;
+      seenMessageIdsRef.current.add(message.id);
+      if (seenMessageIdsRef.current.size > 400) {
+        const oldest = seenMessageIdsRef.current.values().next().value;
+        if (oldest) seenMessageIdsRef.current.delete(oldest);
+      }
+
       setMessages((prev) => [...prev, message].slice(-250));
 
       if (message.type === 'message') {
@@ -508,11 +599,29 @@ export default function App() {
         });
       }
 
-      // Trigger Danmaku item at the BOTTOM of the screen when there is text
+      // Trigger Danmaku item on 4 dedicated bottom lanes to prevent text collisions (mask spoilers)
       if ((message.type === 'message' || message.type === 'action') && message.text) {
+        const maskedDanmakuText = message.text.replace(/\|\|[\s\S]+?\|\|/g, '[спойлер]');
+        const lanes = [69, 75, 81, 87];
+        const now = Date.now();
+        let chosenIdx = -1;
+        for (let offset = 0; offset < lanes.length; offset++) {
+          const idx = (danmakuNextLaneRef.current + offset) % lanes.length;
+          if (danmakuLaneExpiryRef.current[idx] <= now) {
+            chosenIdx = idx;
+            break;
+          }
+        }
+        if (chosenIdx === -1) {
+          chosenIdx = danmakuNextLaneRef.current;
+        }
+        danmakuLaneExpiryRef.current[chosenIdx] = now + 2200;
+        danmakuNextLaneRef.current = (chosenIdx + 1) % lanes.length;
+
         const danmaku: DanmakuItem = {
           ...message,
-          topPercent: 72 + (Math.floor(Math.random() * 3) * 5), // 72%, 77%, 82% (bottom area, clear center)
+          text: maskedDanmakuText,
+          topPercent: lanes[chosenIdx],
         };
         setDanmakuItems((prev) => [...prev, danmaku]);
 
@@ -549,8 +658,11 @@ export default function App() {
           return m;
         })
       );
+      const maskedDanmakuText = text.replace(/\|\|[\s\S]+?\|\|/g, '[спойлер]');
       setDanmakuItems((prev) =>
-        prev.map((item) => (item.id === messageId ? { ...item, text, editedAt } : item))
+        prev.map((item) =>
+          item.id === messageId ? { ...item, text: maskedDanmakuText, editedAt } : item
+        )
       );
     });
 
@@ -558,6 +670,16 @@ export default function App() {
     socket.on('chat:deleted', ({ messageId }) => {
       setMessages((prev) => prev.filter((m) => m.id !== messageId));
       setDanmakuItems((prev) => prev.filter((item) => item.id !== messageId));
+    });
+
+    // Ready Check updates ("Все на месте? 🍿")
+    socket.on('room:ready_check_updated', (readyCheck) => {
+      setRoomState((prev) => (prev ? { ...prev, readyCheck } : prev));
+    });
+
+    // Pinned host message updates
+    socket.on('chat:pinned_updated', (pinnedMessage) => {
+      setRoomState((prev) => (prev ? { ...prev, pinnedMessage } : prev));
     });
 
     // Room-wide video upload progress badge
@@ -673,6 +795,16 @@ export default function App() {
   // Leave room flow
   const handleLeaveRoom = () => {
     clearOverlayTimers();
+    clearAllSessionMediaCaches();
+    setLocalTrackUrls({});
+    const currentRId = roomIdRef.current;
+    if (currentRId) {
+      try {
+        sessionStorage.removeItem(`watchparty_chat_${currentRId}`);
+      } catch {}
+    }
+    loadedChatRoomRef.current = null;
+    seenMessageIdsRef.current.clear();
     if (socketRef.current) {
       socketRef.current.disconnect();
     }
@@ -752,8 +884,30 @@ export default function App() {
     socketRef.current?.emit('host:reorder_playlist', { newOrderIds });
   }, []);
 
+  const handleRegisterLocalTrack = useCallback((fileId: string, file: File) => {
+    const blobUrl = registerLocalTrackFile(fileId, file);
+    setLocalTrackUrls((prev) => ({ ...prev, [fileId]: blobUrl }));
+  }, []);
+
+  const handleRevokeLocalTrack = useCallback((fileId: string) => {
+    revokeLocalTrackUrl(fileId);
+    setLocalTrackUrls((prev) => {
+      if (!prev[fileId]) return prev;
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+  }, []);
+
   const handleDeleteTrack = useCallback((fileId: string) => {
+    handleRevokeLocalTrack(fileId);
     socketRef.current?.emit('host:delete_track', { fileId });
+  }, [handleRevokeLocalTrack]);
+
+  const handleLocalMediaMessageSent = useCallback((message: ChatMessage) => {
+    if (seenMessageIdsRef.current.has(message.id)) return;
+    seenMessageIdsRef.current.add(message.id);
+    setMessages((prev) => [...prev, message].slice(-250));
   }, []);
 
   const handleTransferHost = useCallback((newHostUserId: string) => {
@@ -835,6 +989,37 @@ export default function App() {
     socketRef.current?.emit('user:set_prefix', { targetUserId, prefix });
   }, []);
 
+  const handleStartReadyCheck = useCallback(() => {
+    socketRef.current?.emit('host:start_ready_check');
+  }, []);
+
+  const handleCancelReadyCheck = useCallback(() => {
+    socketRef.current?.emit('host:cancel_ready_check');
+  }, []);
+
+  const handleConfirmReady = useCallback(() => {
+    socketRef.current?.emit('client:ready_confirm');
+  }, []);
+
+  const handlePinMessage = useCallback((msg: ChatMessage) => {
+    socketRef.current?.emit('host:pin_message', {
+      messageId: msg.id,
+      text: msg.text,
+      nickname: msg.nickname,
+      hasMedia: Boolean(msg.media),
+      mediaKind: msg.media?.mediaKind,
+      isSticker: Boolean(msg.stickerId),
+    });
+  }, []);
+
+  const handleUnpinMessage = useCallback(() => {
+    socketRef.current?.emit('host:unpin_message');
+  }, []);
+
+  const handleOpenMechanics = useCallback((tab: MechanicsTabId = 'player') => {
+    setMechanicsModal({ open: true, tab });
+  }, []);
+
   const NoticeBanner = appNotice ? (
     <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] max-w-md w-[calc(100%-2rem)]">
       <div
@@ -871,6 +1056,8 @@ export default function App() {
         {NoticeBanner}
         <JoinModal
           initialRoomId={initialUrlRoomId}
+          uiTheme={uiTheme}
+          onChangeUiTheme={setUiTheme}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
         />
@@ -896,7 +1083,7 @@ export default function App() {
         <MessageSquare className="w-3.5 h-3.5" />
         <span>Чат</span>
         {unreadChatCount > 0 && activeTab !== 'chat' && (
-          <span className="ml-1 px-1.5 py-0.2 rounded-full bg-rose-600 text-[10px] text-white font-bold animate-pulse">
+          <span className="ml-1 px-1.5 py-0.2 rounded-full bg-rose-600 text-[10px] text-white font-bold tabular-nums animate-pulse">
             {unreadChatCount}
           </span>
         )}
@@ -913,7 +1100,7 @@ export default function App() {
         <Film className="w-3.5 h-3.5" />
         <span>Плейлист</span>
         {roomState?.playlist.length ? (
-          <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-700 text-neutral-300">
+          <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-700 text-neutral-300 tabular-nums">
             {roomState.playlist.length}
           </span>
         ) : null}
@@ -929,7 +1116,7 @@ export default function App() {
       >
         <Users className="w-3.5 h-3.5" />
         <span>Люди</span>
-        <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-700 text-neutral-300">
+        <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-700 text-neutral-300 tabular-nums">
           {userCount}
         </span>
       </button>
@@ -952,12 +1139,17 @@ export default function App() {
           isKeyboardOpen={isKeyboardOpen}
           typingNicknames={Object.values(typingUsers)}
           roomUploadProgress={roomUploadProgress}
+          pinnedMessage={roomState?.pinnedMessage || null}
           onSendMessage={handleSendMessage}
           onEditMessage={handleEditMessage}
           onDeleteMessage={handleDeleteMessage}
+          onPinMessage={handlePinMessage}
+          onUnpinMessage={handleUnpinMessage}
           onTypingChange={handleTypingChange}
           onSendFloatingEmoji={handleSendFloatingEmoji}
           onSeekToTimecode={handleSeek}
+          onLocalMediaMessageSent={handleLocalMediaMessageSent}
+          onOpenMechanics={handleOpenMechanics}
         />
       </div>
 
@@ -969,6 +1161,9 @@ export default function App() {
           roomId={roomId}
           hostToken={hostToken}
           socketId={socketId}
+          localTrackUrls={localTrackUrls}
+          onRegisterLocalTrack={handleRegisterLocalTrack}
+          onRevokeLocalTrack={handleRevokeLocalTrack}
           onChangeTrack={handleChangeTrack}
           onReorder={handleReorderPlaylist}
           onDeleteTrack={handleDeleteTrack}
@@ -987,6 +1182,8 @@ export default function App() {
           hostCurrentTime={roomState?.playbackState.currentTime || 0}
           onTransferHost={handleTransferHost}
           onSetUserPrefix={handleSetUserPrefix}
+          onStartReadyCheck={handleStartReadyCheck}
+          isReadyCheckActive={Boolean(roomState?.readyCheck)}
         />
       </div>
     </div>
@@ -1006,9 +1203,15 @@ export default function App() {
         nickname={nickname}
         userCount={userCount}
         isConnected={isConnected}
+        uiTheme={uiTheme}
+        onChangeUiTheme={setUiTheme}
+        ambilightEnabled={ambilightEnabled}
+        onToggleAmbilight={setAmbilightEnabled}
         onChangeNickname={handleChangeNickname}
         onLeaveRoom={handleLeaveRoom}
         onCloseRoom={handleCloseRoom}
+        onOpenMechanics={handleOpenMechanics}
+        onOpenSpeedtest={() => setShowSpeedtest(true)}
       />
 
       {/* 2. Unified Orientation Layout: VideoPlayer & Sidebar stay mounted across orientation/theater switches */}
@@ -1049,6 +1252,7 @@ export default function App() {
             currentTrackIndex={roomState?.currentTrackIndex || 0}
             isHost={isHost}
             clockOffsetMs={clockOffsetMs}
+            localFileUrl={currentTrack ? localTrackUrls[currentTrack.id] : undefined}
             playbackState={
               roomState?.playbackState || {
                 isPlaying: false,
@@ -1061,6 +1265,10 @@ export default function App() {
             danmakuItems={danmakuItems}
             floatingEmojis={floatingEmojis}
             isTheaterMode={isPortraitMode ? undefined : isTheaterMode}
+            ambilightEnabled={ambilightEnabled}
+            readyCheck={roomState?.readyCheck || null}
+            users={roomState?.users || {}}
+            currentUserId={socketId}
             onPlay={handlePlay}
             onPause={handlePause}
             onSeek={handleSeek}
@@ -1071,6 +1279,9 @@ export default function App() {
             onProgressReport={handleProgressReport}
             onTriggerUpload={() => setActiveTab('playlist')}
             onToggleTheater={isPortraitMode ? undefined : () => setIsTheaterMode((prev) => !prev)}
+            onStartReadyCheck={handleStartReadyCheck}
+            onCancelReadyCheck={handleCancelReadyCheck}
+            onConfirmReady={handleConfirmReady}
           />
         </section>
 
@@ -1149,6 +1360,17 @@ export default function App() {
           {TabContent}
         </aside>
       </main>
+
+      <SiteMechanicsModal
+        isOpen={mechanicsModal.open}
+        initialTab={mechanicsModal.tab}
+        onClose={() => setMechanicsModal((prev) => ({ ...prev, open: false }))}
+      />
+
+      <SpeedtestModal
+        isOpen={showSpeedtest}
+        onClose={() => setShowSpeedtest(false)}
+      />
     </div>
   );
 }

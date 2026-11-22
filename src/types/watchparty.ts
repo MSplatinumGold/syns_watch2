@@ -1,3 +1,5 @@
+export type VoiceMode = 'text' | 'voice';
+
 export interface User {
   id: string;          // Socket.id
   nickname: string;
@@ -6,6 +8,9 @@ export interface User {
   isBuffering: boolean;
   joinedAt: number;
   currentTime?: number;
+  voiceMode?: VoiceMode;
+  isMicOn?: boolean;
+  isSpeaking?: boolean;
 }
 
 export interface PlaylistItem {
@@ -33,6 +38,24 @@ export interface RoomUploadProgress {
   uploaderName?: string;
 }
 
+export interface ReadyCheckState {
+  id: string;
+  startedBy: string;
+  startedAt: number;
+  readyUserIds: string[];
+}
+
+export interface PinnedChatMessage {
+  id: string;
+  nickname: string;
+  text: string;
+  pinnedBy: string;
+  pinnedAt: number;
+  hasMedia?: boolean;
+  mediaKind?: 'image' | 'video' | 'audio';
+  isSticker?: boolean;
+}
+
 export interface RoomState {
   roomId: string;
   hostId: string;
@@ -41,6 +64,8 @@ export interface RoomState {
   currentTrackIndex: number;
   playbackState: RoomPlaybackState;
   activeUpload?: RoomUploadProgress | null;
+  readyCheck?: ReadyCheckState | null;
+  pinnedMessage?: PinnedChatMessage | null;
   emptyTimeoutId?: NodeJS.Timeout | null;
 }
 
@@ -91,6 +116,12 @@ export interface FloatingEmojiItem {
   xPercent: number;
 }
 
+export interface VoiceSignalPayload {
+  type: 'offer' | 'answer' | 'ice-candidate';
+  sdp?: RTCSessionDescriptionInit;
+  candidate?: RTCIceCandidateInit;
+}
+
 export interface ClientToServerEvents {
   'room:join': (payload: { roomId: string; nickname: string; hostToken?: string }) => void;
   'user:change_nickname': (payload: { nickname: string }) => void;
@@ -104,6 +135,18 @@ export interface ClientToServerEvents {
   'host:reorder_playlist': (payload: { newOrderIds: string[] }) => void;
   'host:delete_track': (payload: { fileId: string }) => void;
   'host:transfer_host': (payload: { newHostUserId: string }) => void;
+  'host:start_ready_check': () => void;
+  'host:cancel_ready_check': () => void;
+  'client:ready_confirm': () => void;
+  'host:pin_message': (payload: {
+    messageId: string;
+    text?: string;
+    nickname?: string;
+    hasMedia?: boolean;
+    mediaKind?: 'image' | 'video' | 'audio';
+    isSticker?: boolean;
+  }) => void;
+  'host:unpin_message': () => void;
   'client:buffering_start': () => void;
   'client:buffering_end': () => void;
   'client:progress': (payload: { currentTime: number }) => void;
@@ -120,6 +163,8 @@ export interface ClientToServerEvents {
     status: 'uploading' | 'retrying' | 'error' | 'completed';
   }) => void;
   'upload:clear': (payload: { fileId: string }) => void;
+  'voice:state': (payload: { mode: VoiceMode; isMicOn: boolean; isSpeaking: boolean }) => void;
+  'voice:signal': (payload: VoiceSignalPayload & { targetUserId: string }) => void;
 }
 
 export interface ServerToClientEvents {
@@ -143,7 +188,17 @@ export interface ServerToClientEvents {
   'chat:typing': (payload: { userId: string; nickname: string; isTyping: boolean }) => void;
   'chat:floating_emoji': (item: FloatingEmojiItem) => void;
   'chat:media_pruned': (payload: { deletedMediaIds: string[] }) => void;
+  'chat:pinned_updated': (pinned: PinnedChatMessage | null) => void;
+  'room:ready_check_updated': (readyCheck: ReadyCheckState | null) => void;
   'upload:progress': (progress: RoomUploadProgress | null) => void;
+  'voice:user_state': (payload: {
+    userId: string;
+    mode: VoiceMode;
+    isMicOn: boolean;
+    isSpeaking: boolean;
+  }) => void;
+  'voice:signal': (payload: VoiceSignalPayload & { fromUserId: string }) => void;
   'room:closed': (payload: { reason: string }) => void;
   'error:notification': (payload: { message: string }) => void;
 }
+

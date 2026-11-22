@@ -45,6 +45,20 @@ interface ServerRoomState extends RoomState {
   lastActivityAt: number;
 }
 
+function toPublicRoomState(room: ServerRoomState): RoomState {
+  return {
+    roomId: room.roomId,
+    hostId: room.hostId,
+    users: room.users,
+    playlist: room.playlist,
+    currentTrackIndex: room.currentTrackIndex,
+    playbackState: room.playbackState,
+    activeUpload: room.activeUpload ?? null,
+    readyCheck: room.readyCheck ?? null,
+    pinnedMessage: room.pinnedMessage ?? null,
+  };
+}
+
 const MAX_CHAT_MEDIA_FILE_SIZE = 10 * 1024 * 1024; // 10 MB per file
 const MAX_CHAT_MEDIA_ROOM_TOTAL = 100 * 1024 * 1024; // 100 MB total per room
 const MAX_PLAYLIST_FILE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB max per video
@@ -459,6 +473,8 @@ const app = express();
 app.set('trust proxy', true);
 
 const server = http.createServer(app);
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
 
 const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents>(server, {
   cors: {
@@ -483,7 +499,9 @@ interface ChunkUploadSession {
   fileName: string;
   completedChunks: Set<number>;
   lastActivity: number;
+  activeWriters: number;
   isFinalizing: boolean;
+  initPromise?: Promise<void>;
 }
 
 const uploadSessions = new Map<string, ChunkUploadSession>();
@@ -534,13 +552,17 @@ function purgeRoom(roomId: string, reason = 'Комната закрыта. Вс
   rooms.delete(roomId);
 }
 
-// Auto-cleanup abandoned uploads older than 60 seconds (checks every 15 seconds)
+// Auto-cleanup truly abandoned uploads older than 5 minutes (never deletes while chunks are actively streaming)
 setInterval(async () => {
   const now = Date.now();
-  const ABANDONED_TIMEOUT_MS = 60 * 1000;
+  const ABANDONED_TIMEOUT_MS = 5 * 60 * 1000;
 
   for (const [fileId, session] of uploadSessions.entries()) {
-    if (!session.isFinalizing && now - session.lastActivity > ABANDONED_TIMEOUT_MS) {
+    if (
+      !session.isFinalizing &&
+      session.activeWriters === 0 &&
+      now - session.lastActivity > ABANDONED_TIMEOUT_MS
+    ) {
       console.log(
         `[Auto-Cleanup] Удалена заброшенная загрузка ${fileId} ("${session.fileName}") в комнате ${session.roomId}`
       );
@@ -615,6 +637,8 @@ app.post('/api/rooms/create', (req, res) => {
     },
     emptyTimeoutId: null,
     activeUpload: null,
+    readyCheck: null,
+    pinnedMessage: null,
     chatMediaFiles: [],
     chatMediaTotalBytes: 0,
     lastActivityAt: Date.now(),
@@ -890,16 +914,6 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
   const roomDir = getRoomStorageDir(roomId);
   const partPath = path.join(roomDir, `${fileId}.part`);
 
-  // Ensure file exists on disk asynchronously so concurrent chunk writes can open with 'r+' safely
-  try {
-    await fsPromises.access(partPath);
-  } catch {
-    try {
-      const handle = await fsPromises.open(partPath, 'w');
-      await handle.close();
-    } catch {}
-  }
-
   // Get or initialize active session in memory (zero per-chunk .info disk writes for higher I/O speed)
   let session = uploadSessions.get(fileId);
   if (!session) {
@@ -911,10 +925,26 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
       fileName,
       completedChunks: new Set<number>(),
       lastActivity: Date.now(),
+      activeWriters: 0,
       isFinalizing: false,
     };
     uploadSessions.set(fileId, session);
   }
+
+  // Ensure .part exists exactly once per upload session using atomic 'wx' create
+  if (!session.initPromise) {
+    session.initPromise = (async () => {
+      try {
+        await fsPromises.access(partPath);
+      } catch {
+        try {
+          const handle = await fsPromises.open(partPath, 'wx');
+          await handle.close();
+        } catch {}
+      }
+    })();
+  }
+  await session.initPromise;
 
   // Keep alive: update last activity timestamp
   session.lastActivity = Date.now();
@@ -925,129 +955,150 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
     return;
   }
 
-  // Open writeStream directly at chunk offset with 512 KB buffer to drastically reduce syscalls on 0.1 vCPU
-  const writeStream = fs.createWriteStream(partPath, {
-    flags: 'r+',
-    start: chunkOffset,
-    highWaterMark: 512 * 1024,
-  });
+  // 1 MB write batching via FileHandle cuts disk/gVisor syscalls by ~30-60x compared to req.pipe(createWriteStream)
+  const WRITE_BATCH_BYTES = 1024 * 1024;
+  let fileHandle: fsPromises.FileHandle | null = null;
+  let writeOffset = chunkOffset;
+  let pendingChunks: Buffer[] = [];
+  let pendingBytes = 0;
 
-  req.pipe(writeStream);
+  session.activeWriters += 1;
+  try {
+    fileHandle = await fsPromises.open(partPath, 'r+');
 
-  req.on('error', (err) => {
-    console.error('Request stream error during chunk upload:', err);
-    writeStream.destroy();
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Ошибка передачи данных чанка' });
+    for await (const rawChunk of req) {
+      const buf = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+      if (buf.length === 0) continue;
+      session.lastActivity = Date.now();
+      pendingChunks.push(buf);
+      pendingBytes += buf.length;
+
+      if (pendingBytes >= WRITE_BATCH_BYTES) {
+        const combined =
+          pendingChunks.length === 1 ? pendingChunks[0] : Buffer.concat(pendingChunks, pendingBytes);
+        pendingChunks = [];
+        pendingBytes = 0;
+        await fileHandle.write(combined, 0, combined.length, writeOffset);
+        writeOffset += combined.length;
+      }
     }
-  });
 
-  writeStream.on('error', (err) => {
-    console.error('File write stream error during chunk upload:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Ошибка записи на диск' });
+    if (pendingBytes > 0) {
+      const tail =
+        pendingChunks.length === 1 ? pendingChunks[0] : Buffer.concat(pendingChunks, pendingBytes);
+      pendingChunks = [];
+      pendingBytes = 0;
+      await fileHandle.write(tail, 0, tail.length, writeOffset);
+      writeOffset += tail.length;
     }
-  });
 
-  writeStream.on('finish', async () => {
-    try {
-      if (!session || !rooms.has(roomId) || !uploadSessions.has(fileId)) {
-        await fsPromises.unlink(partPath).catch(() => {});
+    await fileHandle.close();
+    fileHandle = null;
+
+    if (!session || !rooms.has(roomId) || !uploadSessions.has(fileId)) {
+      await fsPromises.unlink(partPath).catch(() => {});
+      if (!res.headersSent) {
+        res.status(409).json({ error: 'Загрузка была отменена или комната закрыта' });
+      }
+      return;
+    }
+
+    session.completedChunks.add(chunkIndex);
+    session.lastActivity = Date.now();
+    room.lastActivityAt = Date.now();
+
+    // Finalize ONLY when every single chunk has completed, strictly guarded against race conditions
+    const isAllCompleted = session.completedChunks.size === totalChunks;
+
+    if (isAllCompleted) {
+      if (session.isFinalizing) {
         if (!res.headersSent) {
-          res.status(409).json({ error: 'Загрузка была отменена или комната закрыта' });
+          res.json({ success: true, completed: true, alreadyFinalized: true, chunkIndex });
         }
         return;
       }
+      session.isFinalizing = true;
 
-      session.completedChunks.add(chunkIndex);
-      session.lastActivity = Date.now();
-      room.lastActivityAt = Date.now();
-
-      // Finalize ONLY when every single chunk has completed, strictly guarded against race conditions
-      const isAllCompleted = session.completedChunks.size === totalChunks;
-
-      if (isAllCompleted) {
-        // Race condition guard: execute finalization strictly once across concurrent chunks
-        if (session.isFinalizing) {
-          if (!res.headersSent) {
-            res.json({ success: true, completed: true, alreadyFinalized: true, chunkIndex });
-          }
-          return;
-        }
-        session.isFinalizing = true;
-
-        if (totalSize > 0) {
-          await fsPromises.truncate(partPath, totalSize).catch(() => {});
-        }
-
-        const ext = path.extname(fileName).toLowerCase() || '.mp4';
-        const finalFilename = `${fileId}${ext}`;
-        const finalPath = path.join(roomDir, finalFilename);
-
-        // Fully async atomic rename .part -> permanent file
-        await fsPromises.rename(partPath, finalPath);
-
-        uploadSessions.delete(fileId);
-
-        const finalStat = await fsPromises.stat(finalPath);
-        const item: PlaylistItem = {
-          id: fileId,
-          originalName: fileName,
-          filename: finalFilename,
-          size: finalStat.size,
-          mimeType: ext === '.webm' ? 'video/webm' : ext === '.ogg' ? 'video/ogg' : 'video/mp4',
-          url: `/api/rooms/${roomId}/stream/${finalFilename}`,
-        };
-
-        room.playlist.push(item);
-        room.activeUpload = null;
-
-        // Clear upload badge & broadcast playlist update
-        io.to(roomId).emit('upload:progress', null);
-        io.to(roomId).emit('playlist:updated', {
-          playlist: room.playlist,
-          currentTrackIndex: room.currentTrackIndex,
-        });
-
-        io.to(roomId).emit('chat:message', {
-          id: uuidv4(),
-          userId: 'system',
-          nickname: 'Система',
-          text: `Загружен видеофайл: "${fileName}" (${(item.size / (1024 * 1024)).toFixed(1)} МБ)`,
-          timestamp: Date.now(),
-          type: 'system',
-        });
-
-        if (!res.headersSent) {
-          res.json({
-            success: true,
-            completed: true,
-            uploadedBytes: item.size,
-            chunkIndex,
-            completedCount: session.completedChunks.size,
-            totalChunks,
-            item,
-            playlist: room.playlist,
-          });
-        }
-      } else {
-        if (!res.headersSent) {
-          res.json({
-            success: true,
-            completed: false,
-            chunkIndex,
-            completedCount: session.completedChunks.size,
-            totalChunks,
-          });
-        }
+      if (totalSize > 0) {
+        await fsPromises.truncate(partPath, totalSize).catch(() => {});
       }
-    } catch (err) {
-      console.error('Error finalizing chunk write:', err);
+
+      const ext = path.extname(fileName).toLowerCase() || '.mp4';
+      const finalFilename = `${fileId}${ext}`;
+      const finalPath = path.join(roomDir, finalFilename);
+
+      // Fully async atomic rename .part -> permanent file
+      await fsPromises.rename(partPath, finalPath);
+
+      uploadSessions.delete(fileId);
+
+      const finalStat = await fsPromises.stat(finalPath);
+      const item: PlaylistItem = {
+        id: fileId,
+        originalName: fileName,
+        filename: finalFilename,
+        size: finalStat.size,
+        mimeType: ext === '.webm' ? 'video/webm' : ext === '.ogg' ? 'video/ogg' : 'video/mp4',
+        url: `/api/rooms/${roomId}/stream/${finalFilename}`,
+      };
+
+      room.playlist.push(item);
+      room.activeUpload = null;
+
+      // Clear upload badge & broadcast playlist update
+      io.to(roomId).emit('upload:progress', null);
+      io.to(roomId).emit('playlist:updated', {
+        playlist: room.playlist,
+        currentTrackIndex: room.currentTrackIndex,
+      });
+
+      io.to(roomId).emit('chat:message', {
+        id: uuidv4(),
+        userId: 'system',
+        nickname: 'Система',
+        text: `Загружен видеофайл: "${fileName}" (${(item.size / (1024 * 1024)).toFixed(1)} МБ)`,
+        timestamp: Date.now(),
+        type: 'system',
+      });
+
       if (!res.headersSent) {
-        res.status(500).json({ error: 'Ошибка финализации чанка' });
+        res.json({
+          success: true,
+          completed: true,
+          uploadedBytes: item.size,
+          chunkIndex,
+          completedCount: session.completedChunks.size,
+          totalChunks,
+          item,
+          playlist: room.playlist,
+        });
+      }
+    } else {
+      if (!res.headersSent) {
+        res.json({
+          success: true,
+          completed: false,
+          chunkIndex,
+          completedCount: session.completedChunks.size,
+          totalChunks,
+        });
       }
     }
-  });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    const msg = (err as Error | undefined)?.message;
+    if (code !== 'ECONNRESET' && msg !== 'aborted') {
+      console.error('Chunk upload write error:', err);
+    }
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Ошибка передачи или записи чанка' });
+    }
+  } finally {
+    session.activeWriters = Math.max(0, session.activeWriters - 1);
+    if (fileHandle) {
+      await fileHandle.close().catch(() => {});
+    }
+  }
 });
 
 // Cancel in-flight chunked upload and immediately delete .part files asynchronously
@@ -1198,7 +1249,12 @@ app.post('/api/rooms/:roomId/chat/upload', (req, res) => {
     };
 
     registerChatMessage(roomId, messageId, socketId, mediaId);
-    io.to(roomId).emit('chat:message', message);
+    const senderSocket = io.sockets.sockets.get(socketId);
+    if (senderSocket) {
+      senderSocket.to(roomId).emit('chat:message', message);
+    } else {
+      io.to(roomId).emit('chat:message', message);
+    }
 
     if (parsedReplyTo && captionText) {
       const targetNick = room.users[parsedReplyTo.userId]?.nickname || parsedReplyTo.nickname;
@@ -1289,7 +1345,7 @@ app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
       'Accept-Ranges': 'bytes',
       'Content-Length': chunksize,
       'Content-Type': mimeType,
-      'Cache-Control': 'public, max-age=86400, no-transform',
+      'Cache-Control': 'public, max-age=86400, immutable, no-transform',
     });
 
     req.on('close', () => fileStream.destroy());
@@ -1299,7 +1355,7 @@ app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
       'Content-Length': fileSize,
       'Content-Type': mimeType,
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'public, max-age=86400, no-transform',
+      'Cache-Control': 'public, max-age=86400, immutable, no-transform',
     });
     const fileStream = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
     req.on('close', () => fileStream.destroy());
@@ -1366,7 +1422,7 @@ app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
     const fileStream = fs.createReadStream(filePath, {
       start,
       end,
-      highWaterMark: 256 * 1024, // 256 KB buffer for faster streaming with low syscalls on 0.1 vCPU
+      highWaterMark: 512 * 1024, // 512 KB buffer cuts fs.read syscalls in half on 0.1 vCPU
     });
 
     res.writeHead(206, {
@@ -1392,11 +1448,211 @@ app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
       'Cache-Control': 'public, max-age=86400, no-transform',
     });
 
-    const fileStream = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
+    const fileStream = fs.createReadStream(filePath, { highWaterMark: 512 * 1024 });
     req.on('close', () => {
       fileStream.destroy();
     });
     fileStream.pipe(res);
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Lightweight Speedtest Endpoints (Zero disk I/O, zero RAM accumulation)
+// -----------------------------------------------------------------------------
+const SPEEDTEST_CHUNK = Buffer.allocUnsafe(256 * 1024).fill(0x55);
+const SPEEDTEST_MAX_DOWNLOAD = 8 * 1024 * 1024;
+const SPEEDTEST_MAX_UPLOAD = 16 * 1024 * 1024;
+
+app.get('/api/speedtest/ping', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.json({ ok: true, serverTime: Date.now() });
+});
+
+app.get('/api/speedtest/download', (req, res) => {
+  const rawSize = Number(req.query.size);
+  const totalBytes = Number.isFinite(rawSize)
+    ? Math.min(SPEEDTEST_MAX_DOWNLOAD, Math.max(256 * 1024, Math.floor(rawSize)))
+    : 4 * 1024 * 1024;
+
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Length': totalBytes,
+    'Cache-Control': 'no-store, no-transform',
+    'X-Content-Type-Options': 'nosniff',
+  });
+
+  let remaining = totalBytes;
+  let closed = false;
+
+  const stop = () => {
+    closed = true;
+  };
+  req.on('close', stop);
+  res.on('close', stop);
+
+  const pump = () => {
+    while (!closed && remaining > 0) {
+      const toSend = Math.min(remaining, SPEEDTEST_CHUNK.length);
+      const slice =
+        toSend === SPEEDTEST_CHUNK.length ? SPEEDTEST_CHUNK : SPEEDTEST_CHUNK.subarray(0, toSend);
+      remaining -= toSend;
+      const ok = res.write(slice);
+      if (!ok) {
+        if (!closed && remaining > 0) {
+          res.once('drain', pump);
+        }
+        return;
+      }
+    }
+    if (!closed && remaining <= 0) {
+      res.end();
+    }
+  };
+
+  pump();
+});
+
+app.post('/api/speedtest/upload', (req, res) => {
+  const startedAt = Date.now();
+  let receivedBytes = 0;
+  let aborted = false;
+
+  req.on('data', (chunk: Buffer) => {
+    if (aborted) return;
+    receivedBytes += chunk.length;
+    if (receivedBytes > SPEEDTEST_MAX_UPLOAD) {
+      aborted = true;
+      req.destroy();
+      if (!res.headersSent) {
+        res.status(413).json({ error: 'Слишком большой тестовый пакет' });
+      }
+    }
+  });
+
+  req.on('end', () => {
+    if (aborted || res.headersSent) return;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      receivedBytes,
+      serverElapsedMs: Math.max(1, Date.now() - startedAt),
+    });
+  });
+
+  req.on('error', () => {
+    aborted = true;
+  });
+});
+
+// Upload benchmark with real 1 MB batched FileHandle disk write (mirrors video chunk upload)
+app.post('/api/speedtest/upload-disk', async (req, res) => {
+  const startedAt = Date.now();
+  const benchPath = path.join(STORAGE_BASE_DIR, `_bench_ul_${uuidv4()}.tmp`);
+  const WRITE_BATCH_BYTES = 1024 * 1024;
+  let handle: fsPromises.FileHandle | null = null;
+  let receivedBytes = 0;
+  let writeOffset = 0;
+  let diskWriteMs = 0;
+  let pendingChunks: Buffer[] = [];
+  let pendingBytes = 0;
+
+  try {
+    handle = await fsPromises.open(benchPath, 'w');
+    for await (const rawChunk of req) {
+      const buf = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+      if (buf.length === 0) continue;
+      receivedBytes += buf.length;
+      if (receivedBytes > SPEEDTEST_MAX_UPLOAD) {
+        req.destroy();
+        if (!res.headersSent) {
+          res.status(413).json({ error: 'Слишком большой тестовый пакет' });
+        }
+        return;
+      }
+      pendingChunks.push(buf);
+      pendingBytes += buf.length;
+      if (pendingBytes >= WRITE_BATCH_BYTES) {
+        const combined =
+          pendingChunks.length === 1 ? pendingChunks[0] : Buffer.concat(pendingChunks, pendingBytes);
+        pendingChunks = [];
+        pendingBytes = 0;
+        const w0 = Date.now();
+        await handle.write(combined, 0, combined.length, writeOffset);
+        diskWriteMs += Date.now() - w0;
+        writeOffset += combined.length;
+      }
+    }
+
+    if (pendingBytes > 0) {
+      const tail =
+        pendingChunks.length === 1 ? pendingChunks[0] : Buffer.concat(pendingChunks, pendingBytes);
+      pendingChunks = [];
+      pendingBytes = 0;
+      const w0 = Date.now();
+      await handle.write(tail, 0, tail.length, writeOffset);
+      diskWriteMs += Date.now() - w0;
+      writeOffset += tail.length;
+    }
+
+    await handle.close();
+    handle = null;
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      receivedBytes,
+      diskWriteMs: Math.max(1, diskWriteMs),
+      serverTotalMs: Math.max(1, Date.now() - startedAt),
+    });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    const msg = (err as Error | undefined)?.message;
+    if (code !== 'ECONNRESET' && msg !== 'aborted' && !res.headersSent) {
+      res.status(500).json({ error: 'Ошибка дискового теста' });
+    }
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+    await fsPromises.unlink(benchPath).catch(() => {});
+  }
+});
+
+// Pure server disk write & CPU event-loop lag check (4 MB local write)
+app.get('/api/speedtest/host-check', async (_req, res) => {
+  const benchPath = path.join(STORAGE_BASE_DIR, `_bench_host_${uuidv4()}.tmp`);
+  const oneMbBlock = Buffer.allocUnsafe(1024 * 1024).fill(0x42);
+  let handle: fsPromises.FileHandle | null = null;
+
+  try {
+    // 1. Event-loop CPU throttling check (expected ~20ms)
+    const lagStart = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const eventLoopLagMs = Math.max(0, Date.now() - lagStart - 20);
+
+    // 2. Local disk write throughput (4 MB in 1 MB blocks)
+    const diskStart = Date.now();
+    handle = await fsPromises.open(benchPath, 'w');
+    for (let i = 0; i < 4; i++) {
+      await handle.write(oneMbBlock, 0, oneMbBlock.length, i * oneMbBlock.length);
+    }
+    await handle.close();
+    handle = null;
+    const diskElapsedMs = Math.max(1, Date.now() - diskStart);
+    const diskWriteMBs = Number(((4 * 1000) / diskElapsedMs).toFixed(1));
+    const rssMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      diskWriteMBs,
+      diskElapsedMs,
+      eventLoopLagMs,
+      rssMb,
+    });
+  } catch {
+    res.status(500).json({ error: 'Ошибка проверки диска/CPU сервера' });
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+    await fsPromises.unlink(benchPath).catch(() => {});
   }
 });
 
@@ -1446,6 +1702,8 @@ io.on('connection', (socket) => {
         },
         emptyTimeoutId: null,
         activeUpload: null,
+        readyCheck: null,
+        pinnedMessage: null,
         chatMediaFiles: [],
         chatMediaTotalBytes: 0,
         lastActivityAt: Date.now(),
@@ -1481,8 +1739,8 @@ io.on('connection', (socket) => {
 
     room.users[socket.id] = newUser;
 
-    // Send state without NodeJS.Timeout handle
-    socket.emit('room:init_state', { ...room, emptyTimeoutId: null });
+    // Send clean public state without private server fields (hostToken, creatorIp, etc.)
+    socket.emit('room:init_state', toPublicRoomState(room));
 
     // Notify other users
     socket.to(cleanRoomId).emit('room:user_joined', newUser);
@@ -1581,6 +1839,11 @@ io.on('connection', (socket) => {
       currentTime,
       serverTimestamp: room.playbackState.lastUpdatedServerTime,
     });
+
+    if (room.readyCheck) {
+      room.readyCheck = null;
+      io.to(currentRoomId).emit('room:ready_check_updated', null);
+    }
   });
 
   // Host: Pause
@@ -1638,6 +1901,11 @@ io.on('connection', (socket) => {
       timestamp: Date.now(),
       type: 'system',
     });
+
+    if (room.readyCheck) {
+      room.readyCheck = null;
+      io.to(currentRoomId).emit('room:ready_check_updated', null);
+    }
   });
 
   // Host: Change Track
@@ -1760,6 +2028,99 @@ io.on('connection', (socket) => {
       timestamp: Date.now(),
       type: 'system',
     });
+  });
+
+  // Ready Check: Host start / cancel & Client confirm
+  socket.on('host:start_ready_check', () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.hostId !== socket.id) return;
+
+    const actor = room.users[socket.id];
+    room.lastActivityAt = Date.now();
+    room.readyCheck = {
+      id: uuidv4(),
+      startedBy: actor?.nickname || 'Хост',
+      startedAt: Date.now(),
+      readyUserIds: [socket.id],
+    };
+
+    io.to(currentRoomId).emit('room:ready_check_updated', room.readyCheck);
+    io.to(currentRoomId).emit('chat:message', {
+      id: uuidv4(),
+      userId: 'system',
+      nickname: 'Система',
+      text: '🍿 Хост запустил проверку готовности «Все на месте?»',
+      timestamp: Date.now(),
+      type: 'system',
+    });
+  });
+
+  socket.on('host:cancel_ready_check', () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.hostId !== socket.id || !room.readyCheck) return;
+
+    room.readyCheck = null;
+    io.to(currentRoomId).emit('room:ready_check_updated', null);
+  });
+
+  socket.on('client:ready_confirm', () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || !room.readyCheck || !room.users[socket.id]) return;
+
+    if (!room.readyCheck.readyUserIds.includes(socket.id)) {
+      room.readyCheck.readyUserIds.push(socket.id);
+      room.lastActivityAt = Date.now();
+      io.to(currentRoomId).emit('room:ready_check_updated', room.readyCheck);
+    }
+  });
+
+  // Host: Pin / Unpin Chat Message
+  socket.on('host:pin_message', ({ messageId, text, nickname, hasMedia, mediaKind, isSticker }) => {
+    if (!currentRoomId || typeof messageId !== 'string' || !messageId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.hostId !== socket.id) return;
+
+    const actor = room.users[socket.id];
+    const safeText = (typeof text === 'string' ? text : '').replace(/[\r\n]+/g, ' ').trim().slice(0, 180);
+    const safeNick = (typeof nickname === 'string' ? nickname : '').trim().slice(0, 24) || 'Участник';
+    const validMediaKind =
+      mediaKind === 'image' || mediaKind === 'video' || mediaKind === 'audio'
+        ? mediaKind
+        : undefined;
+
+    room.lastActivityAt = Date.now();
+    room.pinnedMessage = {
+      id: messageId.slice(0, 64),
+      nickname: safeNick,
+      text: safeText,
+      pinnedBy: actor?.nickname || 'Хост',
+      pinnedAt: Date.now(),
+      hasMedia: Boolean(hasMedia),
+      mediaKind: validMediaKind,
+      isSticker: Boolean(isSticker),
+    };
+
+    io.to(currentRoomId).emit('chat:pinned_updated', room.pinnedMessage);
+    io.to(currentRoomId).emit('chat:message', {
+      id: uuidv4(),
+      userId: 'system',
+      nickname: 'Система',
+      text: `📌 Хост закрепил сообщение от ${safeNick}`,
+      timestamp: Date.now(),
+      type: 'system',
+    });
+  });
+
+  socket.on('host:unpin_message', () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.hostId !== socket.id || !room.pinnedMessage) return;
+
+    room.pinnedMessage = null;
+    io.to(currentRoomId).emit('chat:pinned_updated', null);
   });
 
   // Smart Buffer Barrier: Client Buffering Start
@@ -1924,11 +2285,17 @@ io.on('connection', (socket) => {
     const cleanText = (typeof text === 'string' ? text : '').trim().slice(0, 500);
     if (!cleanText && !entry.mediaId) return;
 
+    const editedAt = Date.now();
     io.to(currentRoomId).emit('chat:edited', {
       messageId,
       text: cleanText,
-      editedAt: Date.now(),
+      editedAt,
     });
+
+    if (room.pinnedMessage && room.pinnedMessage.id === messageId) {
+      room.pinnedMessage.text = cleanText.replace(/[\r\n]+/g, ' ').slice(0, 180);
+      io.to(currentRoomId).emit('chat:pinned_updated', room.pinnedMessage);
+    }
   });
 
   // Delete own chat message
@@ -1953,6 +2320,11 @@ io.on('connection', (socket) => {
     }
 
     io.to(currentRoomId).emit('chat:deleted', { messageId });
+
+    if (room.pinnedMessage && room.pinnedMessage.id === messageId) {
+      room.pinnedMessage = null;
+      io.to(currentRoomId).emit('chat:pinned_updated', null);
+    }
   });
 
   // Host upload progress broadcast (throttled on client)
@@ -2049,6 +2421,14 @@ io.on('connection', (socket) => {
 
     const remainingUsers = Object.values(room.users);
 
+    if (room.readyCheck && remainingUsers.length > 0) {
+      const nextReady = room.readyCheck.readyUserIds.filter((id) => id !== socket.id);
+      if (nextReady.length !== room.readyCheck.readyUserIds.length) {
+        room.readyCheck.readyUserIds = nextReady;
+        io.to(currentRoomId).emit('room:ready_check_updated', room.readyCheck);
+      }
+    }
+
     if (room.hostId === socket.id) {
       if (remainingUsers.length > 0) {
         // Find user with lowest joinedAt (FIFO)
@@ -2142,7 +2522,7 @@ io.on('connection', (socket) => {
 // Vite Dev Server / Static Hosting Integration
 // -----------------------------------------------------------------------------
 async function startServer() {
-  const isProduction = process.env.NODE_ENV === 'production';
+  const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--prod');
 
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
@@ -2153,14 +2533,114 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(__dirname, 'dist');
-    if (!fs.existsSync(path.join(distPath, 'index.html'))) {
+    const indexHtmlPath = path.join(distPath, 'index.html');
+    if (!fs.existsSync(indexHtmlPath)) {
       console.error(
-        `[WatchParty Server] ОШИБКА: Файл ${path.join(distPath, 'index.html')} не найден! Убедитесь, что в Build Command выполняется "npm run build".`
+        `[WatchParty Server] ОШИБКА: Файл ${indexHtmlPath} не найден! Убедитесь, что в Build Command выполняется "npm run build".`
       );
     }
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+
+    // Scan pre-compressed .br/.gz files once at startup (zero per-request fs.stat overhead on 0.1 vCPU)
+    const precompressedFiles = new Set<string>();
+    if (fs.existsSync(distPath)) {
+      const scanDist = (dir: string, relBase = '') => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const rel = `${relBase}/${entry.name}`;
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            scanDist(full, rel);
+          } else if (entry.name.endsWith('.br') || entry.name.endsWith('.gz')) {
+            precompressedFiles.add(rel);
+          }
+        }
+      };
+      scanDist(distPath);
+    }
+
+    const staticMimeTypes: Record<string, string> = {
+      '.js': 'application/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.html': 'text/html; charset=utf-8',
+      '.svg': 'image/svg+xml',
+      '.json': 'application/json; charset=utf-8',
+      '.tgs': 'application/gzip',
+    };
+
+    const getStaticCacheControl = (urlPath: string): string => {
+      if (urlPath === '/index.html' || urlPath.endsWith('.html')) {
+        return 'no-cache';
+      }
+      if (urlPath.startsWith('/assets/')) {
+        return 'public, max-age=2592000, immutable';
+      }
+      if (urlPath.startsWith('/stickers/')) {
+        return 'public, max-age=604800, immutable';
+      }
+      return 'public, max-age=86400';
+    };
+
+    // Serve pre-compressed .br / .gz assets with zero runtime CPU compression
+    app.use((req, res, next) => {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+      const reqPath = req.path === '/' ? '/index.html' : req.path;
+      if (reqPath.startsWith('/api/') || reqPath.startsWith('/socket.io/')) return next();
+
+      const acceptEnc = String(req.headers['accept-encoding'] || '');
+      let encoding: 'br' | 'gzip' | null = null;
+      let compressedRel = '';
+
+      if (acceptEnc.includes('br') && precompressedFiles.has(`${reqPath}.br`)) {
+        encoding = 'br';
+        compressedRel = `${reqPath}.br`;
+      } else if (acceptEnc.includes('gzip') && precompressedFiles.has(`${reqPath}.gz`)) {
+        encoding = 'gzip';
+        compressedRel = `${reqPath}.gz`;
+      }
+
+      if (!encoding) return next();
+
+      const resolvedPath = path.resolve(distPath, `.${compressedRel}`);
+      if (!resolvedPath.startsWith(distPath + path.sep)) return next();
+
+      const ext = path.extname(reqPath).toLowerCase();
+      res.setHeader('Content-Encoding', encoding);
+      res.setHeader('Vary', 'Accept-Encoding');
+      res.setHeader('Cache-Control', getStaticCacheControl(reqPath));
+      if (staticMimeTypes[ext]) {
+        res.setHeader('Content-Type', staticMimeTypes[ext]);
+      }
+      res.sendFile(resolvedPath);
+    });
+
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          const relUrl = '/' + path.relative(distPath, filePath).replace(/\\/g, '/');
+          res.setHeader('Cache-Control', getStaticCacheControl(relUrl));
+        },
+      })
+    );
+
+    app.get('*', (req, res) => {
+      const acceptEnc = String(req.headers['accept-encoding'] || '');
+      if (acceptEnc.includes('br') && precompressedFiles.has('/index.html.br')) {
+        res.setHeader('Content-Encoding', 'br');
+        res.setHeader('Vary', 'Accept-Encoding');
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.sendFile(`${indexHtmlPath}.br`);
+        return;
+      }
+      if (acceptEnc.includes('gzip') && precompressedFiles.has('/index.html.gz')) {
+        res.setHeader('Content-Encoding', 'gzip');
+        res.setHeader('Vary', 'Accept-Encoding');
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.sendFile(`${indexHtmlPath}.gz`);
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(indexHtmlPath);
     });
   }
 

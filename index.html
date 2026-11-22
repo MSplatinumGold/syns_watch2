@@ -9,6 +9,14 @@
     <meta property="og:description" content="Синхронный просмотр видео с друзьями: WebSocket синхронизация таймкодов, умная буферизация, чат, плейлисты и HTTP 206 стриминг." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      try {
+        var t = localStorage.getItem('watchparty_ui_theme');
+        if (t === 'nordic' || t === 'velvet' || t === 'sakura') {
+          document.documentElement.setAttribute('data-theme', t);
+        }
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

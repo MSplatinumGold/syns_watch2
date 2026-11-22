@@ -17,14 +17,16 @@ import {
   UploadCloud,
   PanelRightClose,
   PanelRightOpen,
-  Download,
-  CheckCircle2,
+  Check,
+  X,
 } from 'lucide-react';
 import type {
   PlaylistItem,
   RoomPlaybackState,
   DanmakuItem,
   FloatingEmojiItem,
+  ReadyCheckState,
+  User,
 } from '../types/watchparty.ts';
 import { formatTime, parseTime } from '../utils/format.ts';
 import { DanmakuOverlay, FloatingEmojisOverlay } from './DanmakuOverlay.tsx';
@@ -39,7 +41,12 @@ interface VideoPlayerProps {
   danmakuItems: DanmakuItem[];
   floatingEmojis?: FloatingEmojiItem[];
   isTheaterMode?: boolean;
+  ambilightEnabled?: boolean;
   clockOffsetMs?: number;
+  localFileUrl?: string;
+  readyCheck?: ReadyCheckState | null;
+  users?: Record<string, User>;
+  currentUserId?: string;
   onPlay: (currentTime: number) => void;
   onPause: (currentTime: number) => void;
   onSeek: (targetTime: number) => void;
@@ -50,6 +57,9 @@ interface VideoPlayerProps {
   onProgressReport?: (currentTime: number) => void;
   onTriggerUpload?: () => void;
   onToggleTheater?: () => void;
+  onStartReadyCheck?: () => void;
+  onCancelReadyCheck?: () => void;
+  onConfirmReady?: () => void;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -62,7 +72,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   danmakuItems,
   floatingEmojis = [],
   isTheaterMode,
+  ambilightEnabled = true,
   clockOffsetMs = 0,
+  localFileUrl,
+  readyCheck = null,
+  users = {},
+  currentUserId = '',
   onPlay,
   onPause,
   onSeek,
@@ -73,13 +88,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onProgressReport,
   onTriggerUpload,
   onToggleTheater,
+  onStartReadyCheck,
+  onCancelReadyCheck,
+  onConfirmReady,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const seekbarRef = useRef<HTMLDivElement>(null);
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ambientCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDraggingSeekRef = useRef(false);
   const lastProgressReportRef = useRef<number>(0);
+  const lastReportedSecondRef = useRef<number>(-1);
 
   // Sync reference anchor: { currentTime, serverTimestamp }
   const syncAnchorRef = useRef<{ currentTime: number; serverTimestamp: number }>({
@@ -105,15 +126,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const stageRef = useRef<HTMLDivElement>(null);
   const [stageDimensions, setStageDimensions] = useState<{ width: number; height: number } | null>(null);
 
-  // Item 2: Preload entire video in advance into browser memory / blob
-  const [preloadProgress, setPreloadProgress] = useState<number | null>(null);
-  const [isFullyPreloaded, setIsFullyPreloaded] = useState(false);
-  const [preloadedBlobUrl, setPreloadedBlobUrl] = useState<string | null>(null);
   const [bufferAheadSeconds, setBufferAheadSeconds] = useState(0);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
-  const preloadControllerRef = useRef<AbortController | null>(null);
-  const preloadedBlobUrlRef = useRef<string | null>(null);
-  preloadedBlobUrlRef.current = preloadedBlobUrl;
+  const [hasPlaybackStarted, setHasPlaybackStarted] = useState(false);
+  const [centerFlash, setCenterFlash] = useState<{ id: number; type: 'play' | 'pause' } | null>(null);
+  const [ambientGlow, setAmbientGlow] = useState<string>('');
 
   const currentTimeRef = useRef(0);
   currentTimeRef.current = currentTime;
@@ -190,45 +207,127 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [playbackState.currentTime, playbackState.lastUpdatedServerTime]);
 
-  // Video source handling: prioritizes local preloaded blob if available, else network stream URL
-  const videoSourceUrl = preloadedBlobUrl || currentTrack?.url;
+  // Video source handling: prioritizes host's local File ObjectURL (0 server traffic), else network stream URL
+  const isLocalFile = Boolean(localFileUrl);
+  const videoSourceUrl = localFileUrl || currentTrack?.url;
 
-  // Cleanup preloaded blob, abort controller, and timers on unmount
+  // Track whether playback actually started for the current track (for metadata-only preload while idle)
+  useEffect(() => {
+    if (playbackState.isPlaying) {
+      setHasPlaybackStarted(true);
+    }
+  }, [playbackState.isPlaying]);
+
+  // Cleanup controls & center flash timers on unmount
   useEffect(() => {
     return () => {
-      if (preloadedBlobUrlRef.current) {
-        URL.revokeObjectURL(preloadedBlobUrlRef.current);
-        preloadedBlobUrlRef.current = null;
-      }
-      if (preloadControllerRef.current) {
-        preloadControllerRef.current.abort();
-        preloadControllerRef.current = null;
-      }
       if (controlsTimeoutRef.current) {
         clearTimeout(controlsTimeoutRef.current);
         controlsTimeoutRef.current = null;
       }
+      if (flashTimerRef.current) {
+        clearTimeout(flashTimerRef.current);
+        flashTimerRef.current = null;
+      }
     };
   }, []);
 
-  // Track changed -> Immediately reset timecode, buffer, and cached blob
+  const triggerCenterFlash = useCallback((type: 'play' | 'pause') => {
+    const id = Date.now();
+    setCenterFlash({ id, type });
+    if (flashTimerRef.current) {
+      clearTimeout(flashTimerRef.current);
+    }
+    flashTimerRef.current = setTimeout(() => {
+      flashTimerRef.current = null;
+      setCenterFlash((curr) => (curr && curr.id === id ? null : curr));
+    }, 560);
+  }, []);
+
+  // Ultra-lightweight Ambilight frame sampler (12x6 tiny grid, runs every ~550ms during playback)
+  const sampleAmbientColors = useCallback(() => {
+    if (!ambilightEnabled || !videoSourceUrl || isFullscreen) return;
+    const video = videoRef.current;
+    if (!video || video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) return;
+
+    try {
+      let canvas = ambientCanvasRef.current;
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvas.width = 12;
+        canvas.height = 6;
+        ambientCanvasRef.current = canvas;
+      }
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+
+      ctx.drawImage(video, 0, 0, 12, 6);
+      const pixels = ctx.getImageData(0, 0, 12, 6).data;
+
+      const avgRegion = (minX: number, maxX: number) => {
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let count = 0;
+        for (let y = 0; y < 6; y++) {
+          for (let x = minX; x < maxX; x++) {
+            const idx = (y * 12 + x) * 4;
+            r += pixels[idx];
+            g += pixels[idx + 1];
+            b += pixels[idx + 2];
+            count++;
+          }
+        }
+        if (count === 0) return 'rgba(244, 63, 94, 0.25)';
+        const rr = Math.min(255, Math.round((r / count) * 1.18));
+        const gg = Math.min(255, Math.round((g / count) * 1.18));
+        const bb = Math.min(255, Math.round((b / count) * 1.18));
+        return `rgba(${rr}, ${gg}, ${bb}, 0.45)`;
+      };
+
+      const leftColor = avgRegion(0, 4);
+      const centerColor = avgRegion(4, 8);
+      const rightColor = avgRegion(8, 12);
+
+      setAmbientGlow(
+        `radial-gradient(ellipse 60% 85% at 15% 50%, ${leftColor}, transparent 72%), radial-gradient(ellipse 65% 85% at 50% 50%, ${centerColor}, transparent 75%), radial-gradient(ellipse 60% 85% at 85% 50%, ${rightColor}, transparent 72%)`
+      );
+    } catch {
+      setAmbientGlow(
+        'radial-gradient(ellipse 75% 80% at 30% 50%, rgba(244, 63, 94, 0.24), transparent 72%), radial-gradient(ellipse 75% 80% at 70% 50%, rgba(245, 158, 11, 0.2), transparent 72%)'
+      );
+    }
+  }, [ambilightEnabled, videoSourceUrl, isFullscreen]);
+
+  useEffect(() => {
+    if (!ambilightEnabled || !videoSourceUrl || isFullscreen) {
+      setAmbientGlow('');
+      return;
+    }
+    sampleAmbientColors();
+    if (!playbackState.isPlaying || playbackState.isSystemPausedForBuffering) {
+      return;
+    }
+    const timer = setInterval(sampleAmbientColors, 550);
+    return () => clearInterval(timer);
+  }, [
+    ambilightEnabled,
+    videoSourceUrl,
+    isFullscreen,
+    playbackState.isPlaying,
+    playbackState.isSystemPausedForBuffering,
+    sampleAmbientColors,
+  ]);
+
+  // Track changed -> Immediately reset timecode, buffer, and preload flag
   useEffect(() => {
     setCurrentTime(0);
     setBufferedPercent(0);
     setBufferAheadSeconds(0);
     setScrubbingTime(null);
-    setIsFullyPreloaded(false);
-    setPreloadProgress(null);
-    if (preloadedBlobUrlRef.current) {
-      URL.revokeObjectURL(preloadedBlobUrlRef.current);
-      preloadedBlobUrlRef.current = null;
-      setPreloadedBlobUrl(null);
-    }
-    if (preloadControllerRef.current) {
-      preloadControllerRef.current.abort();
-      preloadControllerRef.current = null;
-    }
+    setHasPlaybackStarted(false);
     setAutoplayBlocked(false);
+    lastReportedSecondRef.current = -1;
     syncAnchorRef.current = {
       currentTime: 0,
       serverTimestamp: getServerNow(),
@@ -238,83 +337,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [currentTrack?.id, currentTrackIndex, getServerNow]);
 
-  // Handler to preload full video in advance into browser memory (Item 2)
-  const handlePreloadFullVideo = async () => {
-    const rawUrl = currentTrack?.url;
-    if (!rawUrl || preloadProgress !== null || isFullyPreloaded) return;
-
-    setPreloadProgress(0);
-    const controller = new AbortController();
-    preloadControllerRef.current = controller;
-
-    try {
-      const res = await fetch(rawUrl, {
-        signal: controller.signal,
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const total = parseInt(
-        res.headers.get('content-length') || `${currentTrack?.size || 0}`,
-        10
-      );
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('ReadableStream not supported');
-
-      const chunks: Uint8Array[] = [];
-      let loaded = 0;
-      let lastProgressUpdate = 0;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) {
-          chunks.push(value);
-          loaded += value.length;
-          if (total > 0) {
-            const now = Date.now();
-            const pct = Math.min(100, Math.round((loaded / total) * 100));
-            if (now - lastProgressUpdate >= 200 || pct === 100) {
-              lastProgressUpdate = now;
-              setPreloadProgress(pct);
-            }
-          }
-        }
-      }
-
-      const mime = currentTrack?.mimeType || 'video/mp4';
-      const blob = new Blob(chunks as unknown as BlobPart[], { type: mime });
-      chunks.length = 0; // Release chunk array references promptly to reduce peak RAM
-
-      if (preloadedBlobUrlRef.current) {
-        URL.revokeObjectURL(preloadedBlobUrlRef.current);
-      }
-      const blobUrl = URL.createObjectURL(blob);
-      preloadedBlobUrlRef.current = blobUrl;
-
-      setPreloadedBlobUrl(blobUrl);
-      setIsFullyPreloaded(true);
-      setPreloadProgress(null);
-
-      // Seamlessly switch video source without losing playback position
-      if (videoRef.current) {
-        const curTime = videoRef.current.currentTime;
-        const wasPlaying = !videoRef.current.paused;
-        videoRef.current.src = blobUrl;
-        videoRef.current.currentTime = curTime;
-        if (wasPlaying) {
-          videoRef.current.play().catch(() => {});
-        }
-      }
-    } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        console.error('Full video preload error:', err);
-      }
-      setPreloadProgress(null);
-    }
-  };
-
-  // Monitor native browser video buffer without any phantom network requests (Option 1)
+  // Monitor native browser video buffer without any phantom network requests
   useEffect(() => {
     if (!videoSourceUrl) return;
 
@@ -322,7 +345,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const video = videoRef.current;
       if (!video || !duration || duration <= 0) return;
 
-      if (isFullyPreloaded) {
+      if (isLocalFile) {
         setBufferAheadSeconds(duration);
         return;
       }
@@ -340,7 +363,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }, 1000);
 
     return () => clearInterval(bufferCheckInterval);
-  }, [videoSourceUrl, duration, isFullyPreloaded]);
+  }, [videoSourceUrl, duration, isLocalFile]);
 
   // Track Ended -> Host trigger auto next or pause if last track (Item 1)
   const handleEnded = useCallback(() => {
@@ -356,8 +379,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [isHost, currentTrackIndex, playlist.length, duration, onTrackEnded, onPause]);
 
-  // Smart buffer margin check (Item 2: avoid micro-stalls if healthy buffer margin is present)
+  // Smart buffer margin check (avoid micro-stalls if healthy buffer margin is present or playing locally)
   const handleBufferingCheck = useCallback(() => {
+    if (isLocalFile) return;
     const video = videoRef.current;
     if (!video || !video.duration) return;
     let bufferAhead = 0;
@@ -372,7 +396,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (bufferAhead < 0.5) {
       onBufferingStart();
     }
-  }, [onBufferingStart]);
+  }, [isLocalFile, onBufferingStart]);
 
   // Sync bus drift correction loop (spec 4.1 & item 7: 1.05x / 0.95x smooth adjustment)
   useEffect(() => {
@@ -497,7 +521,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, []);
 
-  // Update current time display and report progress to server
+  // Update current time display and report progress to server (throttled & integer-rounded)
   const handleTimeUpdate = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -507,11 +531,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
     updateBuffer();
 
-    // Report progress to other users every ~2 seconds to save WebSocket traffic
+    // Only emit progress while actively playing, rounded to whole seconds, max once per 3s
+    if (!playbackState.isPlaying || playbackState.isSystemPausedForBuffering || !onProgressReport) {
+      return;
+    }
+    const wholeSec = Math.floor(video.currentTime);
     const now = Date.now();
-    if (now - lastProgressReportRef.current > 2000 && onProgressReport) {
+    if (wholeSec !== lastReportedSecondRef.current && now - lastProgressReportRef.current >= 3000) {
       lastProgressReportRef.current = now;
-      onProgressReport(video.currentTime);
+      lastReportedSecondRef.current = wholeSec;
+      onProgressReport(wholeSec);
     }
   };
 
@@ -611,8 +640,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const current = video ? video.currentTime : currentTime;
 
     if (playbackState.isPlaying) {
+      triggerCenterFlash('pause');
       onPause(current);
     } else {
+      triggerCenterFlash('play');
       onPlay(current);
     }
   };
@@ -741,8 +772,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           const video = videoRef.current;
           const current = video ? video.currentTime : currentTimeRef.current;
           if (isPlayingRef.current) {
+            triggerCenterFlash('pause');
             onPause(current);
           } else {
+            triggerCenterFlash('play');
             onPlay(current);
           }
         }
@@ -788,20 +821,48 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isHost, onPlay, onPause, onSeek]);
+  }, [isHost, onPlay, onPause, onSeek, triggerCenterFlash]);
 
   const displayTime = scrubbingTime !== null ? scrubbingTime : currentTime;
   const progressPercent = duration > 0 ? (displayTime / duration) * 100 : 0;
 
+  const userList = Object.values(users);
+  const totalUsersCount = userList.length;
+  const readySet = new Set(readyCheck?.readyUserIds || []);
+  const readyUsersCount = readyCheck
+    ? userList.filter((u) => readySet.has(u.id)).length
+    : 0;
+  const isSelfReady = Boolean(currentUserId && readySet.has(currentUserId));
+  const allUsersReady = totalUsersCount > 0 && readyUsersCount === totalUsersCount;
+  const readyProgressPercent =
+    totalUsersCount > 0 ? Math.round((readyUsersCount / totalUsersCount) * 100) : 0;
+
   return (
     <div
       ref={stageRef}
-      className="w-full h-full flex items-center justify-center overflow-hidden min-h-0 min-w-0"
+      className="relative w-full h-full flex items-center justify-center overflow-hidden min-h-0 min-w-0"
     >
+      {/* Lightweight Ambilight Ambient Glow behind 16:9 Player */}
+      {ambilightEnabled && videoSourceUrl && !isFullscreen && ambientGlow && (
+        <div
+          aria-hidden="true"
+          className="absolute pointer-events-none blur-3xl opacity-75 transition-[background] duration-700 ease-out"
+          style={{
+            ...(stageDimensions
+              ? {
+                  width: `${stageDimensions.width + 64}px`,
+                  height: `${stageDimensions.height + 64}px`,
+                }
+              : { inset: '-24px' }),
+            background: ambientGlow,
+          }}
+        />
+      )}
+
       <div
         ref={containerRef}
         onMouseMove={handleMouseMove}
-        className="relative bg-neutral-950 rounded-2xl overflow-hidden shadow-2xl flex flex-col justify-center items-center select-none group border border-neutral-800 shrink-0 transition-[width,height] duration-150"
+        className="relative z-10 bg-neutral-950 rounded-2xl overflow-hidden shadow-2xl flex flex-col justify-center items-center select-none group border border-neutral-800 shrink-0 transition-[width,height] duration-150"
         style={
           isFullscreen
             ? { width: '100vw', height: '100vh', borderRadius: 0 }
@@ -823,11 +884,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         <video
           ref={videoRef}
           src={videoSourceUrl}
-          preload="auto"
+          preload={isLocalFile || playbackState.isPlaying || hasPlaybackStarted ? 'auto' : 'metadata'}
           playsInline
-          className="w-full h-full object-contain"
+          onClick={isHost ? handleTogglePlay : undefined}
+          className={`w-full h-full object-contain ${isHost ? 'cursor-pointer' : ''}`}
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
+          onLoadedData={sampleAmbientColors}
+          onSeeked={sampleAmbientColors}
           onWaiting={handleBufferingCheck}
           onStalled={handleBufferingCheck}
           onCanPlay={onBufferingEnd}
@@ -884,6 +948,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <Volume2 className="w-4 h-4 sm:w-5 sm:h-5" />
             <span>Нажмите, чтобы включить звук и синхронизироваться</span>
           </button>
+        </div>
+      )}
+
+      {/* Host Play/Pause Center Flash Animation */}
+      {centerFlash && (
+        <div
+          key={centerFlash.id}
+          aria-hidden="true"
+          className="absolute inset-0 pointer-events-none flex items-center justify-center z-25"
+        >
+          <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-black/60 backdrop-blur-md border border-white/15 flex items-center justify-center shadow-2xl animate-play-flash">
+            {centerFlash.type === 'play' ? (
+              <Play className="w-7 h-7 sm:w-9 sm:h-9 text-white fill-white ml-1" />
+            ) : (
+              <Pause className="w-7 h-7 sm:w-9 sm:h-9 text-white fill-white" />
+            )}
+          </div>
         </div>
       )}
 
@@ -952,7 +1033,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
           {/* Smooth drift speed adjustment pill (Item 7) */}
           {playbackRate !== 1.0 && playbackState.isPlaying && (
-            <div className="flex items-center gap-1 bg-amber-500/20 backdrop-blur-md border border-amber-500/40 text-amber-300 px-2.5 py-1 rounded-full text-[11px] font-mono font-semibold animate-pulse">
+            <div className="flex items-center gap-1 bg-amber-500/20 backdrop-blur-md border border-amber-500/40 text-amber-300 px-2.5 py-1 rounded-full text-[11px] font-mono tabular-nums font-semibold animate-pulse">
               <Gauge className="w-3 h-3" />
               <span>{playbackRate === 1.05 ? '⚡ 1.05x догонка' : '🐢 0.95x подгонка'}</span>
             </div>
@@ -960,10 +1041,130 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
-      {/* Top Header Overlay with Title & Danmaku Toggle */}
+      {/* Floating Ready Check ("Все на месте? 🍿") Card */}
+      {readyCheck && (
+        <div className="absolute top-11 sm:top-14 left-1/2 -translate-x-1/2 z-30 w-[calc(100%-1.5rem)] max-w-md pointer-events-auto">
+          <div className="bg-neutral-950/90 backdrop-blur-xl border border-neutral-700/80 rounded-2xl shadow-2xl p-3 sm:p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-base leading-none shrink-0">🍿</span>
+                <div className="min-w-0">
+                  <div className="text-xs sm:text-sm font-bold text-white truncate">
+                    Все на месте?
+                  </div>
+                  <div className="text-[11px] text-neutral-400 truncate">
+                    Инициатор: {readyCheck.startedBy}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <span
+                  className={`px-2 py-0.5 rounded-full text-xs font-mono tabular-nums font-bold border ${
+                    allUsersReady
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  }`}
+                >
+                  {readyUsersCount}/{totalUsersCount}
+                </span>
+                {isHost && onCancelReadyCheck && (
+                  <button
+                    type="button"
+                    onClick={onCancelReadyCheck}
+                    className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white transition cursor-pointer"
+                    title="Закрыть проверку готовности"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Readiness progress bar */}
+            <div className="w-full h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+              <div
+                className={`h-full transition-all duration-300 rounded-full ${
+                  allUsersReady
+                    ? 'bg-emerald-500'
+                    : 'bg-gradient-to-r from-rose-500 to-amber-500'
+                }`}
+                style={{ width: `${readyProgressPercent}%` }}
+              />
+            </div>
+
+            {/* Compact user status pills */}
+            {userList.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+                {userList.map((u) => {
+                  const isReady = readySet.has(u.id);
+                  return (
+                    <span
+                      key={u.id}
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                        isReady
+                          ? 'bg-emerald-500/15 text-emerald-200 border-emerald-500/35'
+                          : 'bg-neutral-900/90 text-neutral-400 border-neutral-700/70'
+                      }`}
+                    >
+                      {isReady ? (
+                        <Check className="w-3 h-3 text-emerald-400 shrink-0" />
+                      ) : (
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400/80 animate-pulse shrink-0" />
+                      )}
+                      <span className="truncate max-w-[110px]">{u.nickname}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Action buttons */}
+            <div className="flex items-center justify-end gap-2 pt-0.5">
+              {!isSelfReady && onConfirmReady && (
+                <button
+                  type="button"
+                  onClick={onConfirmReady}
+                  className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 shadow-lg shadow-emerald-600/25 transition active:scale-95 cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Я готов 🍿</span>
+                </button>
+              )}
+
+              {isHost && videoSourceUrl && (
+                <button
+                  type="button"
+                  onClick={() => onPlay(currentTimeRef.current)}
+                  className={`px-3 py-1.5 rounded-xl text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95 cursor-pointer ${
+                    allUsersReady
+                      ? 'bg-emerald-600 hover:bg-emerald-500 shadow-lg shadow-emerald-600/30'
+                      : 'bg-rose-600 hover:bg-rose-500 shadow-lg shadow-rose-600/25'
+                  }`}
+                >
+                  <Play className="w-3.5 h-3.5 fill-white" />
+                  <span>Запустить</span>
+                </button>
+              )}
+
+              {isHost && onCancelReadyCheck && (
+                <button
+                  type="button"
+                  onClick={onCancelReadyCheck}
+                  className="px-2.5 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white text-xs font-medium border border-neutral-700 transition cursor-pointer"
+                >
+                  Закрыть
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Top Header Overlay with Title, Ready Check & Danmaku Toggle */}
       <div
         className={`absolute top-0 left-0 right-0 p-2 sm:p-4 bg-gradient-to-b from-black/80 via-black/30 to-transparent flex items-center justify-between z-20 transition-opacity duration-300 ${
-          showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          showControls || readyCheck ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
         <div className="flex items-center gap-2 overflow-hidden mr-4">
@@ -976,6 +1177,30 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          {isHost && onStartReadyCheck && (
+            <button
+              type="button"
+              onClick={() => {
+                if (readyCheck) {
+                  onCancelReadyCheck?.();
+                } else {
+                  onStartReadyCheck();
+                }
+              }}
+              className={`px-2.5 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 transition cursor-pointer border ${
+                readyCheck
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                  : 'bg-neutral-800/80 hover:bg-neutral-700/90 text-neutral-200 border-neutral-700/60'
+              }`}
+              title="Проверка готовности зрителей «Все на месте? 🍿»"
+            >
+              <span className="leading-none">🍿</span>
+              <span className="hidden sm:inline">
+                {readyCheck ? `Готовы ${readyUsersCount}/${totalUsersCount}` : 'Все на месте?'}
+              </span>
+            </button>
+          )}
+
           <button
             onClick={() => setDanmakuEnabled(!danmakuEnabled)}
             className={`px-2.5 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 transition ${
@@ -1015,7 +1240,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           {/* Hover / Drag tooltip with timecode */}
           {isHost && hoverSeekTime !== null && (
             <div
-              className="absolute -top-7 px-2 py-0.5 rounded bg-black/95 text-[11px] font-mono text-white shadow-xl border border-neutral-700 pointer-events-none -translate-x-1/2"
+              className="absolute -top-7 px-2 py-0.5 rounded bg-black/95 text-[11px] font-mono tabular-nums text-white shadow-xl border border-neutral-700 pointer-events-none -translate-x-1/2"
               style={{ left: `${hoverSeekPos}px` }}
             >
               {formatTime(hoverSeekTime)}
@@ -1079,33 +1304,33 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             )}
 
             {/* Time Display */}
-            <div className="font-mono text-neutral-300 text-xs tracking-tight">
+            <div className="font-mono tabular-nums text-neutral-300 text-xs tracking-tight">
               <span className="text-white font-medium">{formatTime(displayTime)}</span>
               <span className="text-neutral-500 mx-1">/</span>
               <span>{formatTime(duration)}</span>
             </div>
 
-            {/* Native Buffer / Cache Indicator */}
+            {/* Native Buffer / Local File Indicator */}
             {videoSourceUrl && duration > 0 && (
               <div
-                className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900/90 border border-neutral-700/60 text-[11px] font-mono"
+                className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900/90 border border-neutral-700/60 text-[11px] font-mono tabular-nums"
                 title={
-                  isFullyPreloaded
-                    ? 'Видео полностью сохранено в памяти браузера (0 сетевых запросов при просмотре)'
+                  isLocalFile
+                    ? 'Видео воспроизводится с вашего устройства (0 байт входящего трафика)'
                     : bufferAheadSeconds > 0
                     ? `Нативный буфер браузера: +${Math.round(bufferAheadSeconds)} сек запаса (HTTP 206 стриминг)`
                     : 'Потоковое воспроизведение (HTTP 206)'
                 }
               >
-                <span className={isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                <span className={isLocalFile || bufferAheadSeconds >= 10 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
                   ⚡
                 </span>
                 <span className="text-neutral-400">
-                  {isFullyPreloaded ? 'Кэш:' : 'Буфер:'}
+                  {isLocalFile ? 'Файл:' : 'Буфер:'}
                 </span>
-                <span className={isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
-                  {isFullyPreloaded
-                    ? '100%'
+                <span className={isLocalFile || bufferAheadSeconds >= 10 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
+                  {isLocalFile
+                    ? 'Локально'
                     : bufferAheadSeconds >= 60
                     ? `+${Math.floor(bufferAheadSeconds / 60)}:${Math.floor(bufferAheadSeconds % 60).toString().padStart(2, '0')}`
                     : `+${Math.round(bufferAheadSeconds)}с`}
@@ -1180,39 +1405,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   <Clock className="w-3 h-3" />
                 </button>
               </form>
-            )}
-
-            {/* Full Video Preload Button (Item 2: Загрузить всё видео сразу в память) */}
-            {videoSourceUrl && (
-              <>
-                {isFullyPreloaded ? (
-                  <div
-                    className="px-2 py-1 rounded-lg bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-medium flex items-center gap-1.5"
-                    title="Видео загружено целиком в локальную память браузера. Поток не докачивается при просмотре."
-                  >
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    <span className="hidden md:inline">В кэше 100%</span>
-                  </div>
-                ) : preloadProgress !== null ? (
-                  <div
-                    className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-700 text-xs font-mono text-amber-300 flex items-center gap-1.5"
-                    title="Идет полная предзагрузка видео в кэш браузера..."
-                  >
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                    <span>{preloadProgress}%</span>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={handlePreloadFullVideo}
-                    className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white border border-neutral-700 text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
-                    title="Загрузить видео целиком в память браузера сразу, чтобы не докачивать поток во время просмотра"
-                  >
-                    <Download className="w-3.5 h-3.5 text-rose-400" />
-                    <span className="hidden md:inline">Предзагрузить всё</span>
-                  </button>
-                )}
-              </>
             )}
 
             {/* Theater Mode Toggle (Hide/Show sidebar on PC) */}
