@@ -11,6 +11,8 @@ import {
   AlertCircle,
   CheckCircle2,
   Clock,
+  HardDrive,
+  Cpu,
 } from 'lucide-react';
 
 interface SpeedtestModalProps {
@@ -18,16 +20,20 @@ interface SpeedtestModalProps {
   onClose: () => void;
 }
 
-type TestPhase = 'idle' | 'ping' | 'download' | 'upload' | 'done' | 'error';
+type TestPhase = 'idle' | 'ping' | 'download' | 'upload' | 'disk' | 'done' | 'error';
 
 interface SpeedtestResult {
   pingMs: number | null;
   jitterMs: number | null;
   downloadMbps: number | null;
   uploadMbps: number | null;
+  diskUploadMbps: number | null;
+  hostDiskMBs: number | null;
+  eventLoopLagMs: number | null;
+  serverDiskWriteMs: number | null;
 }
 
-function formatUploadEstimate(uploadMbps: number | null, sizeMb = 500): string {
+function formatUploadEstimate(uploadMbps: number | null, sizeMb = 400): string {
   if (!uploadMbps || uploadMbps <= 0) return '—';
   const totalBits = sizeMb * 8;
   const seconds = Math.round(totalBits / uploadMbps);
@@ -46,6 +52,10 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
     jitterMs: null,
     downloadMbps: null,
     uploadMbps: null,
+    diskUploadMbps: null,
+    hostDiskMBs: null,
+    eventLoopLagMs: null,
+    serverDiskWriteMs: null,
   });
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -88,18 +98,92 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
     return () => cancelActiveTest();
   }, [cancelActiveTest]);
 
+  const measureXhrUpload = (url: string, sizeBytes: number, onLive: (mbps: number, pct: number) => void) => {
+    const payload = new Uint8Array(sizeBytes);
+    payload.fill(0x61);
+
+    return new Promise<{ mbps: number; serverDiskWriteMs?: number }>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      uploadXhrRef.current = xhr;
+      const startAt = performance.now();
+      let trimStart = 0;
+      let trimBytes = 0;
+
+      xhr.open('POST', url);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+      xhr.upload.onprogress = (ev) => {
+        if (cancelledRef.current) return;
+        const loaded = ev.loaded;
+        const now = performance.now();
+        if (trimStart === 0 && loaded >= sizeBytes * 0.15) {
+          trimStart = now;
+          trimBytes = loaded;
+        }
+        const elapsed = (now - startAt) / 1000;
+        const trimmedElapsed = trimStart > 0 ? (now - trimStart) / 1000 : 0;
+        const mbps =
+          trimmedElapsed > 0.15 && loaded > trimBytes
+            ? ((loaded - trimBytes) * 8) / (trimmedElapsed * 1_000_000)
+            : elapsed > 0
+            ? (loaded * 8) / (elapsed * 1_000_000)
+            : 0;
+        onLive(Number(mbps.toFixed(1)), Math.min(99, Math.round((loaded / sizeBytes) * 100)));
+      };
+
+      xhr.onload = () => {
+        uploadXhrRef.current = null;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const totalSec = Math.max(0.05, (performance.now() - startAt) / 1000);
+          const mbps = Number(((sizeBytes * 8) / (totalSec * 1_000_000)).toFixed(1));
+          let serverDiskWriteMs: number | undefined;
+          try {
+            const parsed = JSON.parse(xhr.responseText);
+            if (typeof parsed.diskWriteMs === 'number') {
+              serverDiskWriteMs = parsed.diskWriteMs;
+            }
+          } catch {}
+          resolve({ mbps, serverDiskWriteMs });
+        } else {
+          reject(new Error(`Ошибка отдачи (HTTP ${xhr.status})`));
+        }
+      };
+
+      xhr.onerror = () => {
+        uploadXhrRef.current = null;
+        reject(new Error('Сетевой сбой при тесте отдачи'));
+      };
+
+      xhr.onabort = () => {
+        uploadXhrRef.current = null;
+        reject(new Error('ABORTED'));
+      };
+
+      xhr.send(payload);
+    });
+  };
+
   const runSpeedtest = async () => {
     cancelActiveTest();
     cancelledRef.current = false;
     setErrorMsg(null);
     setLiveMbps(null);
-    setResult({ pingMs: null, jitterMs: null, downloadMbps: null, uploadMbps: null });
+    setResult({
+      pingMs: null,
+      jitterMs: null,
+      downloadMbps: null,
+      uploadMbps: null,
+      diskUploadMbps: null,
+      hostDiskMBs: null,
+      eventLoopLagMs: null,
+      serverDiskWriteMs: null,
+    });
 
     const ac = new AbortController();
     abortControllerRef.current = ac;
 
     try {
-      // 1. Ping & Jitter (5 probes, first probe warms TLS/route)
+      // 1. Ping & Jitter (5 probes, first warms route)
       setPhase('ping');
       setProgress(0);
       const rtts: number[] = [];
@@ -113,9 +197,7 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         await res.json();
         const rtt = Math.max(1, performance.now() - t0);
-        if (i > 0) {
-          rtts.push(rtt);
-        }
+        if (i > 0) rtts.push(rtt);
         setProgress(Math.round(((i + 1) / 5) * 100));
       }
 
@@ -187,72 +269,58 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
       const finalDownloadMbps = Number(((dlLoaded * 8) / (dlTotalSec * 1_000_000)).toFixed(1));
       setResult((prev) => ({ ...prev, downloadMbps: finalDownloadMbps }));
 
-      // 3. Upload Speed (4 MB payload via XHR so we get real browser upload progress)
+      // 3. Upload Speed to RAM (4 MB payload)
       if (cancelledRef.current) return;
       setPhase('upload');
       setProgress(0);
       setLiveMbps(0);
 
-      const ulSize = 4 * 1024 * 1024;
-      const payload = new Uint8Array(ulSize);
-      payload.fill(0x61);
-
-      const finalUploadMbps = await new Promise<number>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        uploadXhrRef.current = xhr;
-        const ulStartAt = performance.now();
-        let ulTrimStart = 0;
-        let ulTrimBytes = 0;
-
-        xhr.open('POST', `/api/speedtest/upload?t=${Date.now()}`);
-        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-
-        xhr.upload.onprogress = (ev) => {
-          if (cancelledRef.current) return;
-          const loaded = ev.loaded;
-          const now = performance.now();
-          if (ulTrimStart === 0 && loaded >= ulSize * 0.15) {
-            ulTrimStart = now;
-            ulTrimBytes = loaded;
-          }
-          const elapsed = (now - ulStartAt) / 1000;
-          const trimmedElapsed = ulTrimStart > 0 ? (now - ulTrimStart) / 1000 : 0;
-          const mbps =
-            trimmedElapsed > 0.15 && loaded > ulTrimBytes
-              ? ((loaded - ulTrimBytes) * 8) / (trimmedElapsed * 1_000_000)
-              : elapsed > 0
-              ? (loaded * 8) / (elapsed * 1_000_000)
-              : 0;
-          setLiveMbps(Number(mbps.toFixed(1)));
-          setProgress(Math.min(100, Math.round((loaded / ulSize) * 100)));
-        };
-
-        xhr.onload = () => {
-          uploadXhrRef.current = null;
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const totalSec = Math.max(0.05, (performance.now() - ulStartAt) / 1000);
-            const mbps = Number(((ulSize * 8) / (totalSec * 1_000_000)).toFixed(1));
-            resolve(mbps);
-          } else {
-            reject(new Error(`Ошибка отдачи (HTTP ${xhr.status})`));
-          }
-        };
-
-        xhr.onerror = () => {
-          uploadXhrRef.current = null;
-          reject(new Error('Сетевой сбой при тесте отдачи'));
-        };
-
-        xhr.onabort = () => {
-          uploadXhrRef.current = null;
-          reject(new Error('ABORTED'));
-        };
-
-        xhr.send(payload);
-      });
-
+      const ramUl = await measureXhrUpload(
+        `/api/speedtest/upload?t=${Date.now()}`,
+        4 * 1024 * 1024,
+        (mbps, pct) => {
+          setLiveMbps(mbps);
+          setProgress(pct);
+        }
+      );
       if (cancelledRef.current) return;
-      setResult((prev) => ({ ...prev, uploadMbps: finalUploadMbps }));
+      setResult((prev) => ({ ...prev, uploadMbps: ramUl.mbps }));
+
+      // 4. Host Disk & CPU Check + 2 MB Disk-Backed Upload (mirrors real video chunk)
+      setPhase('disk');
+      setProgress(15);
+      setLiveMbps(null);
+
+      const hostRes = await fetch(`/api/speedtest/host-check?t=${Date.now()}`, {
+        cache: 'no-store',
+        signal: ac.signal,
+      });
+      if (!hostRes.ok) throw new Error(`Ошибка проверки диска (HTTP ${hostRes.status})`);
+      const hostData = await hostRes.json();
+      if (cancelledRef.current) return;
+
+      setResult((prev) => ({
+        ...prev,
+        hostDiskMBs: typeof hostData.diskWriteMBs === 'number' ? hostData.diskWriteMBs : null,
+        eventLoopLagMs: typeof hostData.eventLoopLagMs === 'number' ? hostData.eventLoopLagMs : null,
+      }));
+      setProgress(45);
+
+      const diskUl = await measureXhrUpload(
+        `/api/speedtest/upload-disk?t=${Date.now()}`,
+        2 * 1024 * 1024,
+        (mbps, pct) => {
+          setLiveMbps(mbps);
+          setProgress(45 + Math.round(pct * 0.55));
+        }
+      );
+      if (cancelledRef.current) return;
+
+      setResult((prev) => ({
+        ...prev,
+        diskUploadMbps: diskUl.mbps,
+        serverDiskWriteMs: diskUl.serverDiskWriteMs ?? null,
+      }));
       setLiveMbps(null);
       setProgress(100);
       setPhase('done');
@@ -268,44 +336,71 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
 
   if (!isOpen) return null;
 
-  const isRunning = phase === 'ping' || phase === 'download' || phase === 'upload';
+  const isRunning = phase === 'ping' || phase === 'download' || phase === 'upload' || phase === 'disk';
 
   const diagnosticSummary = (() => {
     if (phase !== 'done') return null;
-    const { pingMs, downloadMbps, uploadMbps } = result;
+    const {
+      pingMs,
+      downloadMbps,
+      uploadMbps,
+      diskUploadMbps,
+      hostDiskMBs,
+      eventLoopLagMs,
+    } = result;
     const issues: string[] = [];
 
+    if (hostDiskMBs !== null && hostDiskMBs < 8) {
+      issues.push(
+        `Медленный диск хоста (${hostDiskMBs} МБ/с) — сама файловая система сервера тормозит сохранение чанков.`
+      );
+    }
+    if (eventLoopLagMs !== null && eventLoopLagMs > 60) {
+      issues.push(
+        `Сильный троттлинг CPU хоста (лаг ${eventLoopLagMs} мс) — 0.1 vCPU перегружен.`
+      );
+    }
+    if (
+      uploadMbps !== null &&
+      diskUploadMbps !== null &&
+      uploadMbps > 12 &&
+      diskUploadMbps < uploadMbps * 0.45 &&
+      (hostDiskMBs === null || hostDiskMBs >= 10)
+    ) {
+      issues.push(
+        `Сеть в память даёт ${uploadMbps} Мбит/с, но с записью чанка — ${diskUploadMbps} Мбит/с. Попробуйте переключить в плейлисте «1 поток».`
+      );
+    }
     if (uploadMbps !== null && uploadMbps < 10) {
       issues.push(
-        `Низкая скорость загрузки видео на сервер (${uploadMbps} Мбит/с) — файл 400 МБ загрузится ${formatUploadEstimate(
+        `Низкая пропускная способность до сервера (${uploadMbps} Мбит/с) — 400 МБ загрузятся ${formatUploadEstimate(
           uploadMbps,
           400
         )}.`
       );
     }
     if (downloadMbps !== null && downloadMbps < 12) {
-      issues.push(
-        `Ограниченная скорость отдачи с сервера зрителям (${downloadMbps} Мбит/с) — тяжёлые видео могут буферизоваться.`
-      );
+      issues.push(`Ограниченная скорость скачивания (${downloadMbps} Мбит/с).`);
     }
     if (pingMs !== null && pingMs > 160) {
-      issues.push(`Высокий пинг (${pingMs} мс) — сервер удалён географически или трафик идёт через медленный прокси.`);
+      issues.push(`Высокий пинг (${pingMs} мс) — удалённый дата-центр или прокси.`);
     }
+
+    const effectiveMbps = diskUploadMbps ?? uploadMbps;
 
     if (issues.length === 0) {
       return {
         tone: 'good' as const,
-        title: 'Канал до сервера в норме',
-        text: `Соединение стабильное. Видео 400 МБ загрузится примерно за ${formatUploadEstimate(
-          uploadMbps,
-          400
-        )}.`,
+        title: 'Сервер и канал работают нормально',
+        text: `Чанк с записью на диск прошёл на ${effectiveMbps ?? '—'} Мбит/с (${
+          effectiveMbps ? (effectiveMbps / 8).toFixed(1) : '—'
+        } МБ/с). Ролик 400 МБ должен заливаться ~${formatUploadEstimate(effectiveMbps, 400)}.`,
       };
     }
 
     return {
       tone: 'warn' as const,
-      title: 'Обнаружено узкое место канала',
+      title: 'Найдена причина замедления',
       text: issues.join(' '),
     };
   })();
@@ -316,12 +411,16 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
       : phase === 'download'
       ? 'Тест скачивания с сервера (6 МБ)...'
       : phase === 'upload'
-      ? 'Тест загрузки на сервер (4 МБ)...'
+      ? 'Тест чистой сети вверх (4 МБ в RAM)...'
+      : phase === 'disk'
+      ? 'Тест диска хоста, CPU и записи чанка (2 МБ)...'
       : phase === 'done'
-      ? 'Замер завершён'
+      ? 'Диагностика завершена'
       : phase === 'error'
       ? 'Ошибка замера'
-      : 'Готов к проверке канала';
+      : 'Готов к полной диагностике';
+
+  const effectiveUploadMbps = result.diskUploadMbps ?? result.uploadMbps;
 
   return (
     <div
@@ -343,10 +442,10 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
             </div>
             <div className="min-w-0">
               <h2 className="text-sm font-bold text-white truncate">
-                Спидтест до сервера
+                Спидтест и диагностика хоста
               </h2>
               <p className="text-[11px] text-neutral-400 truncate">
-                Реальная скорость между вашим браузером и хостом
+                Сеть, диск сервера и проверка троттлинга 0.1 vCPU
               </p>
             </div>
           </div>
@@ -365,8 +464,8 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
         </div>
 
         {/* Body */}
-        <div className="p-4 space-y-4">
-          {/* Metrics Grid */}
+        <div className="p-4 space-y-3.5 max-h-[82vh] overflow-y-auto">
+          {/* Primary Network Metrics Grid */}
           <div className="grid grid-cols-3 gap-2">
             {/* Ping */}
             <div className="p-3 rounded-xl bg-neutral-950 border border-neutral-800 flex flex-col justify-between">
@@ -408,11 +507,11 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
               </div>
             </div>
 
-            {/* Upload */}
+            {/* Upload (RAM) */}
             <div className="p-3 rounded-xl bg-neutral-950 border border-neutral-800 flex flex-col justify-between">
               <div className="flex items-center gap-1 text-[11px] text-neutral-400">
                 <ArrowUp className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                <span>Загрузка</span>
+                <span>Сеть вверх</span>
               </div>
               <div className="mt-1.5">
                 <span className="text-lg font-bold font-mono tabular-nums text-white">
@@ -427,7 +526,61 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
               <div className="text-[10px] text-neutral-500 font-mono tabular-nums mt-0.5">
                 {result.uploadMbps !== null
                   ? `${(result.uploadMbps / 8).toFixed(1)} МБ/с`
-                  : 'выгрузка'}
+                  : 'в RAM'}
+              </div>
+            </div>
+          </div>
+
+          {/* Host Disk & Real Chunk Upload Grid */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="p-2.5 rounded-xl bg-neutral-950/75 border border-neutral-800/90">
+              <div className="flex items-center gap-1 text-[10px] text-neutral-400">
+                <ArrowUp className="w-3 h-3 text-fuchsia-400 shrink-0" />
+                <span>Чанк+диск</span>
+              </div>
+              <div className="mt-1 font-mono tabular-nums text-xs font-bold text-white">
+                {phase === 'disk' && liveMbps !== null
+                  ? `${liveMbps} Мбит/с`
+                  : result.diskUploadMbps !== null
+                  ? `${result.diskUploadMbps} Мбит/с`
+                  : '—'}
+              </div>
+              <div className="text-[10px] text-neutral-500 font-mono tabular-nums">
+                {result.diskUploadMbps !== null
+                  ? `${(result.diskUploadMbps / 8).toFixed(1)} МБ/с`
+                  : 'как видео'}
+              </div>
+            </div>
+
+            <div className="p-2.5 rounded-xl bg-neutral-950/75 border border-neutral-800/90">
+              <div className="flex items-center gap-1 text-[10px] text-neutral-400">
+                <HardDrive className="w-3 h-3 text-sky-400 shrink-0" />
+                <span>Диск хоста</span>
+              </div>
+              <div className="mt-1 font-mono tabular-nums text-xs font-bold text-white">
+                {result.hostDiskMBs !== null ? `${result.hostDiskMBs} МБ/с` : '—'}
+              </div>
+              <div className="text-[10px] text-neutral-500 font-mono tabular-nums">
+                {result.serverDiskWriteMs !== null
+                  ? `2МБ за ${result.serverDiskWriteMs}мс`
+                  : 'локально'}
+              </div>
+            </div>
+
+            <div className="p-2.5 rounded-xl bg-neutral-950/75 border border-neutral-800/90">
+              <div className="flex items-center gap-1 text-[10px] text-neutral-400">
+                <Cpu className="w-3 h-3 text-amber-400 shrink-0" />
+                <span>Лаг CPU</span>
+              </div>
+              <div className="mt-1 font-mono tabular-nums text-xs font-bold text-white">
+                {result.eventLoopLagMs !== null ? `${result.eventLoopLagMs} мс` : '—'}
+              </div>
+              <div className="text-[10px] text-neutral-500">
+                {result.eventLoopLagMs !== null
+                  ? result.eventLoopLagMs > 60
+                    ? 'троттлинг'
+                    : 'стабильно'
+                  : 'event loop'}
               </div>
             </div>
           </div>
@@ -449,7 +602,7 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
                     ? 'bg-rose-500'
                     : phase === 'done'
                     ? 'bg-emerald-500'
-                    : phase === 'upload'
+                    : phase === 'upload' || phase === 'disk'
                     ? 'bg-gradient-to-r from-rose-500 to-amber-400'
                     : 'bg-gradient-to-r from-sky-500 to-emerald-400'
                 }`}
@@ -484,15 +637,15 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
                 <span>{diagnosticSummary.title}</span>
               </div>
               <p className="text-[11px] leading-relaxed opacity-90">{diagnosticSummary.text}</p>
-              {result.uploadMbps !== null && (
+              {effectiveUploadMbps !== null && (
                 <div className="pt-1 border-t border-white/10 flex items-center justify-between text-[11px] font-mono tabular-nums opacity-85">
                   <span className="flex items-center gap-1">
                     <Clock className="w-3 h-3" />
                     Оценка для файла 400 МБ / 1 ГБ:
                   </span>
                   <span>
-                    {formatUploadEstimate(result.uploadMbps, 400)} /{' '}
-                    {formatUploadEstimate(result.uploadMbps, 1024)}
+                    {formatUploadEstimate(effectiveUploadMbps, 400)} /{' '}
+                    {formatUploadEstimate(effectiveUploadMbps, 1024)}
                   </span>
                 </div>
               )}
@@ -524,12 +677,12 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
                 {phase === 'done' || phase === 'error' ? (
                   <>
                     <RotateCcw className="w-3.5 h-3.5" />
-                    <span>Повторить замер</span>
+                    <span>Повторить диагностику</span>
                   </>
                 ) : (
                   <>
                     <Play className="w-3.5 h-3.5 fill-white" />
-                    <span>Запустить спидтест</span>
+                    <span>Запустить диагностику</span>
                   </>
                 )}
               </button>

@@ -1,4 +1,4 @@
-export const APP_VERSION = '1.0.4 Release';
+export const APP_VERSION = '1.0.5 Release';
 
 export type ChangelogTag = 'Release' | 'Beta' | 'Alpha';
 
@@ -11,6 +11,17 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: '1.0.5 Release',
+    date: '22.11.2026',
+    title: 'Диагностика диска/CPU в Спидтесте и фикс обрывов ECONNRESET',
+    tag: 'Release',
+    changes: [
+      'Спидтест расширен диагностикой хоста: показывает скорость диска сервера (МБ/с), лаг CPU (event loop) и реальную выгрузку чанка 2 МБ с записью на диск.',
+      'Таймаут keep-alive сервера увеличен до 65с для защиты от обрывов ECONNRESET за прокси и туннелями.',
+      'В плейлисте добавлен переключатель потоков загрузки («1 поток» / «2 потока»).',
+    ],
+  },
   {
     version: '1.0.4 Release',
     date: '22.11.2026',

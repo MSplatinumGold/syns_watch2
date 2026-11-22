@@ -100,6 +100,21 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   const [upload, setUpload] = useState<ResumableUploadState | null>(null);
   const [queuedCount, setQueuedCount] = useState(0);
   const [codecWarning, setCodecWarning] = useState<string | null>(null);
+  const [uploadConcurrency, setUploadConcurrency] = useState<1 | 2>(() => {
+    try {
+      return localStorage.getItem('watchparty_upload_streams') === '1' ? 1 : 2;
+    } catch {
+      return 2;
+    }
+  });
+  const uploadConcurrencyRef = useRef<1 | 2>(uploadConcurrency);
+  uploadConcurrencyRef.current = uploadConcurrency;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('watchparty_upload_streams', String(uploadConcurrency));
+    } catch {}
+  }, [uploadConcurrency]);
 
   useEffect(() => {
     return () => {
@@ -279,12 +294,12 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     [roomId, hostToken, socketId, emitRoomUploadProgress, onClearUploadProgress]
   );
 
-  // Concurrent (попутная) chunk upload loop with concurrency pool
+  // Concurrent (попутная) chunk upload loop with configurable concurrency pool (1 or 2 streams)
   const uploadChunkLoop = useCallback(
     async (file: File, fileId: string, initialPendingChunks: number[]) => {
       const queue = [...initialPendingChunks];
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-      const CONCURRENCY = 2; // 2 concurrent 4MB chunks avoids bufferbloat and CPU throttling on 0.1 vCPU
+      const concurrency = uploadConcurrencyRef.current;
 
       const worker = async (): Promise<void> => {
         while (queue.length > 0) {
@@ -353,7 +368,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       };
 
       const workers = Array.from(
-        { length: Math.min(CONCURRENCY, queue.length) },
+        { length: Math.min(concurrency, queue.length) },
         () => worker()
       );
       await Promise.all(workers);
@@ -539,14 +554,24 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         </div>
 
         {isHost && (
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow cursor-pointer"
-            title={upload ? 'Добавить еще файлы в очередь загрузки' : 'Загрузить один или несколько видеофайлов'}
-          >
-            <UploadCloud className="w-3.5 h-3.5" />
-            <span>{upload ? 'Добавить' : 'Загрузить'}</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setUploadConcurrency((prev) => (prev === 2 ? 1 : 2))}
+              className="px-2 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-[11px] font-mono tabular-nums text-neutral-300 hover:text-white transition cursor-pointer"
+              title="Число параллельных потоков при загрузке видео (попробуйте 1 поток, если прокси режет скорость)"
+            >
+              {uploadConcurrency === 1 ? '1 поток' : '2 потока'}
+            </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow cursor-pointer"
+              title={upload ? 'Добавить еще файлы в очередь загрузки' : 'Загрузить один или несколько видеофайлов'}
+            >
+              <UploadCloud className="w-3.5 h-3.5" />
+              <span>{upload ? 'Добавить' : 'Загрузить'}</span>
+            </button>
+          </div>
         )}
       </div>
 

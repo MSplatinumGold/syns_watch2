@@ -473,6 +473,8 @@ const app = express();
 app.set('trust proxy', true);
 
 const server = http.createServer(app);
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
 
 const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents>(server, {
   cors: {
@@ -1075,7 +1077,11 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
       }
     }
   } catch (err) {
-    console.error('Chunk upload write error:', err);
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    const msg = (err as Error | undefined)?.message;
+    if (code !== 'ECONNRESET' && msg !== 'aborted') {
+      console.error('Chunk upload write error:', err);
+    }
     if (!res.headersSent) {
       res.status(500).json({ error: 'Ошибка передачи или записи чанка' });
     }
@@ -1527,6 +1533,118 @@ app.post('/api/speedtest/upload', (req, res) => {
   req.on('error', () => {
     aborted = true;
   });
+});
+
+// Upload benchmark with real 1 MB batched FileHandle disk write (mirrors video chunk upload)
+app.post('/api/speedtest/upload-disk', async (req, res) => {
+  const startedAt = Date.now();
+  const benchPath = path.join(STORAGE_BASE_DIR, `_bench_ul_${uuidv4()}.tmp`);
+  const WRITE_BATCH_BYTES = 1024 * 1024;
+  let handle: fsPromises.FileHandle | null = null;
+  let receivedBytes = 0;
+  let writeOffset = 0;
+  let diskWriteMs = 0;
+  let pendingChunks: Buffer[] = [];
+  let pendingBytes = 0;
+
+  try {
+    handle = await fsPromises.open(benchPath, 'w');
+    for await (const rawChunk of req) {
+      const buf = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+      if (buf.length === 0) continue;
+      receivedBytes += buf.length;
+      if (receivedBytes > SPEEDTEST_MAX_UPLOAD) {
+        req.destroy();
+        if (!res.headersSent) {
+          res.status(413).json({ error: 'Слишком большой тестовый пакет' });
+        }
+        return;
+      }
+      pendingChunks.push(buf);
+      pendingBytes += buf.length;
+      if (pendingBytes >= WRITE_BATCH_BYTES) {
+        const combined =
+          pendingChunks.length === 1 ? pendingChunks[0] : Buffer.concat(pendingChunks, pendingBytes);
+        pendingChunks = [];
+        pendingBytes = 0;
+        const w0 = Date.now();
+        await handle.write(combined, 0, combined.length, writeOffset);
+        diskWriteMs += Date.now() - w0;
+        writeOffset += combined.length;
+      }
+    }
+
+    if (pendingBytes > 0) {
+      const tail =
+        pendingChunks.length === 1 ? pendingChunks[0] : Buffer.concat(pendingChunks, pendingBytes);
+      pendingChunks = [];
+      pendingBytes = 0;
+      const w0 = Date.now();
+      await handle.write(tail, 0, tail.length, writeOffset);
+      diskWriteMs += Date.now() - w0;
+      writeOffset += tail.length;
+    }
+
+    await handle.close();
+    handle = null;
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      receivedBytes,
+      diskWriteMs: Math.max(1, diskWriteMs),
+      serverTotalMs: Math.max(1, Date.now() - startedAt),
+    });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    const msg = (err as Error | undefined)?.message;
+    if (code !== 'ECONNRESET' && msg !== 'aborted' && !res.headersSent) {
+      res.status(500).json({ error: 'Ошибка дискового теста' });
+    }
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+    await fsPromises.unlink(benchPath).catch(() => {});
+  }
+});
+
+// Pure server disk write & CPU event-loop lag check (4 MB local write)
+app.get('/api/speedtest/host-check', async (_req, res) => {
+  const benchPath = path.join(STORAGE_BASE_DIR, `_bench_host_${uuidv4()}.tmp`);
+  const oneMbBlock = Buffer.allocUnsafe(1024 * 1024).fill(0x42);
+  let handle: fsPromises.FileHandle | null = null;
+
+  try {
+    // 1. Event-loop CPU throttling check (expected ~20ms)
+    const lagStart = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const eventLoopLagMs = Math.max(0, Date.now() - lagStart - 20);
+
+    // 2. Local disk write throughput (4 MB in 1 MB blocks)
+    const diskStart = Date.now();
+    handle = await fsPromises.open(benchPath, 'w');
+    for (let i = 0; i < 4; i++) {
+      await handle.write(oneMbBlock, 0, oneMbBlock.length, i * oneMbBlock.length);
+    }
+    await handle.close();
+    handle = null;
+    const diskElapsedMs = Math.max(1, Date.now() - diskStart);
+    const diskWriteMBs = Number(((4 * 1000) / diskElapsedMs).toFixed(1));
+    const rssMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      diskWriteMBs,
+      diskElapsedMs,
+      eventLoopLagMs,
+      rssMb,
+    });
+  } catch {
+    res.status(500).json({ error: 'Ошибка проверки диска/CPU сервера' });
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+    await fsPromises.unlink(benchPath).catch(() => {});
+  }
 });
 
 // -----------------------------------------------------------------------------
