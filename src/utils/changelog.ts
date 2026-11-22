@@ -1,4 +1,4 @@
-export const APP_VERSION = '1.0.2 Release';
+export const APP_VERSION = '1.0.3 Release';
 
 export type ChangelogTag = 'Release' | 'Beta' | 'Alpha';
 
@@ -11,6 +11,17 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: '1.0.3 Release',
+    date: '22.11.2026',
+    title: 'Спидтест до сервера и оптимизация загрузки видео',
+    tag: 'Release',
+    changes: [
+      'Добавлен встроенный Спидтест до сервера (Пинг, Джиттер, Скачивание, Загрузка и оценка времени выгрузки файла).',
+      'Оптимизирована чанковая загрузка видео под слабый хост (0.1 vCPU): чанки 4 МБ в 2 потока без перегрузки канала.',
+      'Исправлена потенциальная гонка при создании временного .part-файла (атомарный флаг wx).',
+    ],
+  },
   {
     version: '1.0.2 Release',
     date: '19.11.2026',

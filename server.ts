@@ -906,12 +906,12 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
   const roomDir = getRoomStorageDir(roomId);
   const partPath = path.join(roomDir, `${fileId}.part`);
 
-  // Ensure file exists on disk asynchronously so concurrent chunk writes can open with 'r+' safely
+  // Atomically create empty .part file only if absent ('wx' never truncates concurrent chunk writes)
   try {
     await fsPromises.access(partPath);
   } catch {
     try {
-      const handle = await fsPromises.open(partPath, 'w');
+      const handle = await fsPromises.open(partPath, 'wx');
       await handle.close();
     } catch {}
   }
@@ -1419,6 +1419,94 @@ app.get('/api/rooms/:roomId/stream/:fileId', async (req, res) => {
     });
     fileStream.pipe(res);
   }
+});
+
+// -----------------------------------------------------------------------------
+// Lightweight Speedtest Endpoints (Zero disk I/O, zero RAM accumulation)
+// -----------------------------------------------------------------------------
+const SPEEDTEST_CHUNK = Buffer.allocUnsafe(256 * 1024).fill(0x55);
+const SPEEDTEST_MAX_DOWNLOAD = 8 * 1024 * 1024;
+const SPEEDTEST_MAX_UPLOAD = 16 * 1024 * 1024;
+
+app.get('/api/speedtest/ping', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.json({ ok: true, serverTime: Date.now() });
+});
+
+app.get('/api/speedtest/download', (req, res) => {
+  const rawSize = Number(req.query.size);
+  const totalBytes = Number.isFinite(rawSize)
+    ? Math.min(SPEEDTEST_MAX_DOWNLOAD, Math.max(256 * 1024, Math.floor(rawSize)))
+    : 4 * 1024 * 1024;
+
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Length': totalBytes,
+    'Cache-Control': 'no-store, no-transform',
+    'X-Content-Type-Options': 'nosniff',
+  });
+
+  let remaining = totalBytes;
+  let closed = false;
+
+  const stop = () => {
+    closed = true;
+  };
+  req.on('close', stop);
+  res.on('close', stop);
+
+  const pump = () => {
+    while (!closed && remaining > 0) {
+      const toSend = Math.min(remaining, SPEEDTEST_CHUNK.length);
+      const slice =
+        toSend === SPEEDTEST_CHUNK.length ? SPEEDTEST_CHUNK : SPEEDTEST_CHUNK.subarray(0, toSend);
+      remaining -= toSend;
+      const ok = res.write(slice);
+      if (!ok) {
+        if (!closed && remaining > 0) {
+          res.once('drain', pump);
+        }
+        return;
+      }
+    }
+    if (!closed && remaining <= 0) {
+      res.end();
+    }
+  };
+
+  pump();
+});
+
+app.post('/api/speedtest/upload', (req, res) => {
+  const startedAt = Date.now();
+  let receivedBytes = 0;
+  let aborted = false;
+
+  req.on('data', (chunk: Buffer) => {
+    if (aborted) return;
+    receivedBytes += chunk.length;
+    if (receivedBytes > SPEEDTEST_MAX_UPLOAD) {
+      aborted = true;
+      req.destroy();
+      if (!res.headersSent) {
+        res.status(413).json({ error: 'Слишком большой тестовый пакет' });
+      }
+    }
+  });
+
+  req.on('end', () => {
+    if (aborted || res.headersSent) return;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      receivedBytes,
+      serverElapsedMs: Math.max(1, Date.now() - startedAt),
+    });
+  });
+
+  req.on('error', () => {
+    aborted = true;
+  });
 });
 
 // -----------------------------------------------------------------------------
@@ -2287,7 +2375,7 @@ io.on('connection', (socket) => {
 // Vite Dev Server / Static Hosting Integration
 // -----------------------------------------------------------------------------
 async function startServer() {
-  const isProduction = process.env.NODE_ENV === 'production';
+  const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--prod');
 
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');

@@ -19,6 +19,7 @@ import {
   Sun,
   BookOpen,
   ChevronRight,
+  Gauge,
 } from 'lucide-react';
 import { copyToClipboard } from '../utils/format.ts';
 import { APP_VERSION, CHANGELOG } from '../utils/changelog.ts';
@@ -56,6 +57,7 @@ interface NavbarProps {
   ambilightEnabled?: boolean;
   onToggleAmbilight?: (enabled: boolean) => void;
   onOpenMechanics?: (tab?: MechanicsTabId) => void;
+  onOpenSpeedtest?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -88,6 +90,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   ambilightEnabled = true,
   onToggleAmbilight,
   onOpenMechanics,
+  onOpenSpeedtest,
 }) => {
   const [copied, setCopied] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -231,6 +234,18 @@ export const Navbar: React.FC<NavbarProps> = ({
           <Users className="w-3.5 h-3.5 text-emerald-400" />
           <span className="font-mono tabular-nums text-white text-[11px]">{userCount}</span>
         </div>
+
+        {onOpenSpeedtest && (
+          <button
+            type="button"
+            onClick={onOpenSpeedtest}
+            className="px-2 md:px-2.5 py-1.5 rounded-lg border bg-neutral-900 hover:bg-neutral-800 border-neutral-800 text-neutral-300 hover:text-sky-300 text-xs font-medium transition cursor-pointer flex items-center gap-1.5"
+            title="Спидтест скорости соединения с сервером"
+          >
+            <Gauge className="w-3.5 h-3.5 text-sky-400" />
+            <span className="hidden md:inline">Спидтест</span>
+          </button>
+        )}
 
         <div className="relative" ref={settingsRef}>
           <button
@@ -396,32 +411,60 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </div>
               )}
 
-              {/* Dedicated Mechanics & Commands Guide Button */}
-              {onOpenMechanics && (
-                <div className="pt-2.5 border-t border-neutral-800">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowSettings(false);
-                      onOpenMechanics('player');
-                    }}
-                    className="w-full px-3 py-2.5 rounded-xl bg-neutral-950/90 hover:bg-neutral-800 border border-neutral-800 hover:border-amber-500/40 transition cursor-pointer flex items-center justify-between gap-2 text-left group"
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="w-7 h-7 rounded-lg bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
-                        <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-xs font-semibold text-white truncate">
-                          Все механики и команды
+              {/* Dedicated Mechanics & Commands Guide + Speedtest Buttons */}
+              {(onOpenMechanics || onOpenSpeedtest) && (
+                <div className="pt-2.5 border-t border-neutral-800 space-y-2">
+                  {onOpenMechanics && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSettings(false);
+                        onOpenMechanics('player');
+                      }}
+                      className="w-full px-3 py-2.5 rounded-xl bg-neutral-950/90 hover:bg-neutral-800 border border-neutral-800 hover:border-amber-500/40 transition cursor-pointer flex items-center justify-between gap-2 text-left group"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-7 h-7 rounded-lg bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
+                          <BookOpen className="w-3.5 h-3.5 text-amber-400" />
                         </div>
-                        <div className="text-[10px] text-neutral-400 truncate">
-                          Плеер, спойлеры, Pin, RP-действия
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-white truncate">
+                            Все механики и команды
+                          </div>
+                          <div className="text-[10px] text-neutral-400 truncate">
+                            Плеер, спойлеры, Pin, RP-действия
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    <ChevronRight className="w-4 h-4 text-neutral-500 group-hover:text-amber-300 transition shrink-0" />
-                  </button>
+                      <ChevronRight className="w-4 h-4 text-neutral-500 group-hover:text-amber-300 transition shrink-0" />
+                    </button>
+                  )}
+
+                  {onOpenSpeedtest && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSettings(false);
+                        onOpenSpeedtest();
+                      }}
+                      className="w-full px-3 py-2.5 rounded-xl bg-neutral-950/90 hover:bg-neutral-800 border border-neutral-800 hover:border-sky-500/40 transition cursor-pointer flex items-center justify-between gap-2 text-left group"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-7 h-7 rounded-lg bg-sky-500/15 border border-sky-500/30 flex items-center justify-center shrink-0">
+                          <Gauge className="w-3.5 h-3.5 text-sky-400" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-white truncate">
+                            Спидтест до сервера
+                          </div>
+                          <div className="text-[10px] text-neutral-400 truncate">
+                            Пинг, скорость загрузки и отдачи
+                          </div>
+                        </div>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-neutral-500 group-hover:text-sky-300 transition shrink-0" />
+                    </button>
+                  )}
                 </div>
               )}
 

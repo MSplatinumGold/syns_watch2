@@ -24,6 +24,7 @@ import { PlaylistPanel } from './components/PlaylistPanel.tsx';
 import { ParticipantsPanel } from './components/ParticipantsPanel.tsx';
 import { JoinModal } from './components/JoinModal.tsx';
 import { SiteMechanicsModal } from './components/SiteMechanicsModal.tsx';
+import { SpeedtestModal } from './components/SpeedtestModal.tsx';
 import {
   clearAllSessionMediaCaches,
   registerLocalTrackFile,
@@ -75,6 +76,7 @@ export default function App() {
     open: false,
     tab: 'player',
   });
+  const [showSpeedtest, setShowSpeedtest] = useState(false);
 
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
   const roomIdRef = useRef<string | null>(null);
@@ -1209,6 +1211,7 @@ export default function App() {
         onLeaveRoom={handleLeaveRoom}
         onCloseRoom={handleCloseRoom}
         onOpenMechanics={handleOpenMechanics}
+        onOpenSpeedtest={() => setShowSpeedtest(true)}
       />
 
       {/* 2. Unified Orientation Layout: VideoPlayer & Sidebar stay mounted across orientation/theater switches */}
@@ -1362,6 +1365,11 @@ export default function App() {
         isOpen={mechanicsModal.open}
         initialTab={mechanicsModal.tab}
         onClose={() => setMechanicsModal((prev) => ({ ...prev, open: false }))}
+      />
+
+      <SpeedtestModal
+        isOpen={showSpeedtest}
+        onClose={() => setShowSpeedtest(false)}
       />
     </div>
   );

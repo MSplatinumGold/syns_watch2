@@ -15,7 +15,7 @@ import {
 import type { PlaylistItem } from '../types/watchparty.ts';
 import { formatBytes } from '../utils/format.ts';
 
-const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB chunks for faster TCP ramp-up and fewer roundtrips
+const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB chunks for smoother throughput & fewer proxy timeouts on 0.1 vCPU
 
 function formatRemainingTime(seconds: number): string {
   if (seconds <= 0 || !isFinite(seconds)) return '< 1 сек';
@@ -276,7 +276,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     async (file: File, fileId: string, initialPendingChunks: number[]) => {
       const queue = [...initialPendingChunks];
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-      const CONCURRENCY = 4; // 4 concurrent 10MB chunks uploaded in parallel
+      const CONCURRENCY = 2; // 2 concurrent 4MB chunks avoids bufferbloat and CPU throttling on 0.1 vCPU
 
       const worker = async (): Promise<void> => {
         while (queue.length > 0) {
