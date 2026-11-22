@@ -15,18 +15,7 @@ import {
 import type { PlaylistItem } from '../types/watchparty.ts';
 import { formatBytes } from '../utils/format.ts';
 
-const CHUNK_SIZE = 6 * 1024 * 1024; // 6 MB chunks: cuts high-ping (300+ ms RTT) HTTP turnaround pauses 3x while staying proxy-friendly
-
-function getCompletedBytes(completedSet: Set<number>, fileSize: number): number {
-  let bytes = 0;
-  completedSet.forEach((idx) => {
-    const start = idx * CHUNK_SIZE;
-    if (start < fileSize) {
-      bytes += Math.min(CHUNK_SIZE, fileSize - start);
-    }
-  });
-  return bytes;
-}
+const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB chunks for faster TCP ramp-up and fewer roundtrips
 
 function formatRemainingTime(seconds: number): string {
   if (seconds <= 0 || !isFinite(seconds)) return '< 1 сек';
@@ -100,24 +89,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   const [upload, setUpload] = useState<ResumableUploadState | null>(null);
   const [queuedCount, setQueuedCount] = useState(0);
   const [codecWarning, setCodecWarning] = useState<string | null>(null);
-  const [uploadConcurrency, setUploadConcurrency] = useState<1 | 2 | 4>(() => {
-    try {
-      const saved = localStorage.getItem('watchparty_upload_streams_v2');
-      if (saved === '1') return 1;
-      if (saved === '2') return 2;
-      return 4;
-    } catch {
-      return 4;
-    }
-  });
-  const uploadConcurrencyRef = useRef<1 | 2 | 4>(uploadConcurrency);
-  uploadConcurrencyRef.current = uploadConcurrency;
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('watchparty_upload_streams_v2', String(uploadConcurrency));
-    } catch {}
-  }, [uploadConcurrency]);
 
   useEffect(() => {
     return () => {
@@ -128,8 +99,10 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     };
   }, []);
 
-  const speedSamplesRef = useRef<Array<{ time: number; bytes: number }>>([]);
-  const lastSpeedUiUpdateRef = useRef<number>(0);
+  const speedTrackerRef = useRef<{ lastTime: number; lastTotalBytes: number }>({
+    lastTime: Date.now(),
+    lastTotalBytes: 0,
+  });
   const lastBroadcastRef = useRef<{ time: number; percent: number; status: string }>({
     time: 0,
     percent: -1,
@@ -179,7 +152,6 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         activeXhrsRef.current.add(xhr);
 
         xhr.open('POST', `/api/rooms/${roomId}/upload/chunk`);
-        xhr.timeout = 90000;
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
         xhr.setRequestHeader('x-host-token', hostToken);
         xhr.setRequestHeader('x-socket-id', socketId);
@@ -194,8 +166,8 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           if (isCancelledRef.current) return;
           chunkLoadedMapRef.current.set(chunkIndex, e.loaded);
 
-          // Aggregate exact uploaded bytes across completed and in-flight chunks
-          const completedBytes = getCompletedBytes(completedChunksSetRef.current, file.size);
+          // Aggregate uploaded bytes across all completed and concurrent in-flight chunks
+          const completedBytes = completedChunksSetRef.current.size * CHUNK_SIZE;
           let inFlightBytes = 0;
           chunkLoadedMapRef.current.forEach((bytes) => {
             inFlightBytes += bytes;
@@ -206,35 +178,36 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           emitRoomUploadProgress(fileId, file.name, percent, 'uploading');
 
           const now = Date.now();
-          const samples = speedSamplesRef.current;
-          const lastSample = samples[samples.length - 1];
-          if (!lastSample || totalUploadedSoFar > lastSample.bytes) {
-            samples.push({ time: now, bytes: totalUploadedSoFar });
-          }
-          // Keep 3-second sliding window for accurate real throughput without artificial zero-drop
-          while (samples.length > 2 && now - samples[0].time > 3000) {
-            samples.shift();
-          }
+          const dt = (now - speedTrackerRef.current.lastTime) / 1000;
+          if (dt >= 0.25) {
+            const dLoaded = totalUploadedSoFar - speedTrackerRef.current.lastTotalBytes;
+            speedTrackerRef.current.lastTime = now;
+            speedTrackerRef.current.lastTotalBytes = totalUploadedSoFar;
 
-          if (now - lastSpeedUiUpdateRef.current >= 250) {
-            lastSpeedUiUpdateRef.current = now;
-            const oldest = samples[0];
-            const newest = samples[samples.length - 1];
-            const windowDt = oldest && newest ? (newest.time - oldest.time) / 1000 : 0;
-            const windowBytes = oldest && newest ? newest.bytes - oldest.bytes : 0;
-            const windowSpeed = windowDt >= 0.2 && windowBytes > 0 ? windowBytes / windowDt : 0;
+            const instantSpeed = dLoaded > 0 && dt > 0 ? dLoaded / dt : 0;
             const remainingBytes = Math.max(0, file.size - totalUploadedSoFar);
 
             setUpload((prev) => {
               if (!prev || prev.status !== 'uploading') return prev;
-              const nextSpeed = windowSpeed > 0 ? windowSpeed : prev.speed;
-              const remainingSec = nextSpeed > 0 ? Math.ceil(remainingBytes / nextSpeed) : 0;
+              const smoothedSpeed =
+                prev.speed > 0 ? prev.speed * 0.65 + instantSpeed * 0.35 : instantSpeed;
+              const remainingSec =
+                smoothedSpeed > 0 ? Math.ceil(remainingBytes / smoothedSpeed) : 0;
               return {
                 ...prev,
                 uploadedBytes: totalUploadedSoFar,
                 currentChunkIndex: completedChunksSetRef.current.size,
-                speed: nextSpeed,
+                speed: smoothedSpeed,
                 remainingSeconds: remainingSec,
+              };
+            });
+          } else {
+            setUpload((prev) => {
+              if (!prev || prev.status !== 'uploading') return prev;
+              return {
+                ...prev,
+                uploadedBytes: totalUploadedSoFar,
+                currentChunkIndex: completedChunksSetRef.current.size,
               };
             });
           }
@@ -292,23 +265,18 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           reject(new Error('Загрузка чанка отменена'));
         };
 
-        xhr.ontimeout = () => {
-          activeXhrsRef.current.delete(xhr);
-          reject(new Error('Таймаут передачи чанка'));
-        };
-
         xhr.send(chunkBlob);
       });
     },
     [roomId, hostToken, socketId, emitRoomUploadProgress, onClearUploadProgress]
   );
 
-  // Concurrent chunk upload loop with configurable concurrency pool (1, 2 or 4 streams)
+  // Concurrent (попутная) chunk upload loop with concurrency pool
   const uploadChunkLoop = useCallback(
     async (file: File, fileId: string, initialPendingChunks: number[]) => {
       const queue = [...initialPendingChunks];
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-      const concurrency = uploadConcurrencyRef.current;
+      const CONCURRENCY = 4; // 4 concurrent 10MB chunks uploaded in parallel
 
       const worker = async (): Promise<void> => {
         while (queue.length > 0) {
@@ -327,9 +295,13 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
             if (isCancelledRef.current) return;
             try {
               if (attempt > 0) {
-                const doneBytes = getCompletedBytes(completedChunksSetRef.current, file.size);
                 const currentPercent =
-                  file.size > 0 ? Math.min(99, Math.round((doneBytes / file.size) * 100)) : 0;
+                  file.size > 0
+                    ? Math.min(
+                        99,
+                        Math.round(((completedChunksSetRef.current.size * CHUNK_SIZE) / file.size) * 100)
+                      )
+                    : 0;
                 emitRoomUploadProgress(fileId, file.name, currentPercent, 'retrying', true);
                 setUpload((prev) =>
                   prev ? { ...prev, status: 'retrying', retryAttempt: attempt } : null
@@ -355,9 +327,13 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
               if (isCancelledRef.current) return;
               attempt++;
               if (attempt > 3) {
-                const doneBytes = getCompletedBytes(completedChunksSetRef.current, file.size);
                 const currentPercent =
-                  file.size > 0 ? Math.min(99, Math.round((doneBytes / file.size) * 100)) : 0;
+                  file.size > 0
+                    ? Math.min(
+                        99,
+                        Math.round(((completedChunksSetRef.current.size * CHUNK_SIZE) / file.size) * 100)
+                      )
+                    : 0;
                 emitRoomUploadProgress(fileId, file.name, currentPercent, 'error', true);
                 setUpload((prev) =>
                   prev
@@ -377,7 +353,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       };
 
       const workers = Array.from(
-        { length: Math.min(concurrency, queue.length) },
+        { length: Math.min(CONCURRENCY, queue.length) },
         () => worker()
       );
       await Promise.all(workers);
@@ -393,8 +369,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       isCancelledRef.current = false;
       completedChunksSetRef.current.clear();
       chunkLoadedMapRef.current.clear();
-      speedSamplesRef.current = [{ time: Date.now(), bytes: 0 }];
-      lastSpeedUiUpdateRef.current = Date.now();
+      speedTrackerRef.current = { lastTime: Date.now(), lastTotalBytes: 0 };
 
       onRegisterLocalTrack?.(fileId, file);
 
@@ -476,9 +451,10 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       }
     } catch {}
 
-    const doneBytes = getCompletedBytes(completedChunksSetRef.current, upload.totalBytes);
     const currentPercent =
-      upload.totalBytes > 0 ? Math.min(99, Math.round((doneBytes / upload.totalBytes) * 100)) : 0;
+      upload.totalBytes > 0
+        ? Math.min(99, Math.round(((completedChunksSetRef.current.size * CHUNK_SIZE) / upload.totalBytes) * 100))
+        : 0;
     emitRoomUploadProgress(upload.fileId, upload.file.name, currentPercent, 'uploading', true);
 
     const totalChunks = Math.ceil(upload.file.size / CHUNK_SIZE);
@@ -489,8 +465,10 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       }
     }
 
-    speedSamplesRef.current = [{ time: Date.now(), bytes: doneBytes }];
-    lastSpeedUiUpdateRef.current = Date.now();
+    speedTrackerRef.current = {
+      lastTime: Date.now(),
+      lastTotalBytes: completedChunksSetRef.current.size * CHUNK_SIZE,
+    };
 
     uploadChunkLoop(upload.file, upload.fileId, pendingChunks);
   };
@@ -557,36 +535,20 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         <div className="flex items-center gap-2">
           <Film className="w-4 h-4 text-rose-500" />
           <h3 className="text-xs md:text-sm font-semibold text-white">Плейлист</h3>
-          <span className="text-[11px] px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400 font-mono tabular-nums">
+          <span className="text-[11px] px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400 font-mono">
             {playlist.length}
           </span>
         </div>
 
         {isHost && (
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() =>
-                setUploadConcurrency((prev) => (prev === 4 ? 2 : prev === 2 ? 1 : 4))
-              }
-              className="px-2 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-[11px] font-mono tabular-nums text-neutral-300 hover:text-white transition cursor-pointer"
-              title="Число параллельных потоков при загрузке видео (4 потока быстрее при пинге 200-300+ мс; 1-2 потока стабильнее через жёсткий прокси)"
-            >
-              {uploadConcurrency === 1
-                ? '1 поток'
-                : uploadConcurrency === 2
-                ? '2 потока'
-                : '4 потока'}
-            </button>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow cursor-pointer"
-              title={upload ? 'Добавить еще файлы в очередь загрузки' : 'Загрузить один или несколько видеофайлов'}
-            >
-              <UploadCloud className="w-3.5 h-3.5" />
-              <span>{upload ? 'Добавить' : 'Загрузить'}</span>
-            </button>
-          </div>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow cursor-pointer"
+            title={upload ? 'Добавить еще файлы в очередь загрузки' : 'Загрузить один или несколько видеофайлов'}
+          >
+            <UploadCloud className="w-3.5 h-3.5" />
+            <span>{upload ? 'Добавить' : 'Загрузить'}</span>
+          </button>
         )}
       </div>
 
@@ -693,7 +655,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           </div>
 
           {/* Row 3: Metrics (Transferred volume, Speed, ETA) */}
-          <div className="flex items-center justify-between text-[11px] text-neutral-400 font-mono tabular-nums">
+          <div className="flex items-center justify-between text-[11px] text-neutral-400 font-mono">
             <span>
               {formatBytes(upload.uploadedBytes)} / {formatBytes(upload.totalBytes)} (
               {Math.min(
@@ -769,7 +731,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                 <div className="flex items-center gap-2.5 min-w-0 flex-1">
                   <div
                     onClick={() => isHost && onChangeTrack(index)}
-                    className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-xs font-mono tabular-nums font-medium transition ${
+                    className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-xs font-mono font-medium transition ${
                       isPlayingThis
                         ? 'bg-rose-600 text-white shadow-sm'
                         : isHost
@@ -796,7 +758,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
                       {item.originalName}
                     </p>
                     <div className="flex items-center gap-1.5 mt-0.5">
-                      <p className="text-[10px] text-neutral-500 font-mono tabular-nums">
+                      <p className="text-[10px] text-neutral-500 font-mono">
                         {formatBytes(item.size)}
                       </p>
                       {localTrackUrls?.[item.id] && (

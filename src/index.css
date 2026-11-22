@@ -172,25 +172,6 @@ html, body, #root {
   animation: floatEmojiUp 2.4s ease-out forwards;
 }
 
-@keyframes playPauseFlash {
-  0% {
-    transform: scale(0.72);
-    opacity: 0;
-  }
-  20% {
-    transform: scale(1.06);
-    opacity: 0.95;
-  }
-  100% {
-    transform: scale(1.38);
-    opacity: 0;
-  }
-}
-
-.animate-play-flash {
-  animation: playPauseFlash 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-}
-
 /* Custom sleek scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

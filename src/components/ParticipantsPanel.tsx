@@ -34,8 +34,6 @@ interface ParticipantsPanelProps {
   onChangePeerVolume?: (peerId: string, volume: number) => void;
   onTransferHost: (newHostUserId: string) => void;
   onSetUserPrefix: (targetUserId: string, prefix: string) => void;
-  onStartReadyCheck?: () => void;
-  isReadyCheckActive?: boolean;
 }
 
 export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
@@ -54,8 +52,6 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
   onChangePeerVolume,
   onTransferHost,
   onSetUserPrefix,
-  onStartReadyCheck,
-  isReadyCheckActive = false,
 }) => {
   const [copied, setCopied] = useState(false);
   const [editingPrefixUserId, setEditingPrefixUserId] = useState<string | null>(null);
@@ -92,46 +88,28 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
         <div className="flex items-center gap-2">
           <Users className="w-4 h-4 text-emerald-400" />
           <h3 className="text-xs md:text-sm font-semibold text-white">Участники</h3>
-          <span className="text-[11px] px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400 font-mono tabular-nums">
+          <span className="text-[11px] px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400 font-mono">
             {userList.length}
           </span>
         </div>
 
-        <div className="flex items-center gap-1.5">
-          {isHost && onStartReadyCheck && (
-            <button
-              type="button"
-              onClick={onStartReadyCheck}
-              className={`px-2 py-1 rounded-lg text-xs font-medium flex items-center gap-1 transition border cursor-pointer ${
-                isReadyCheckActive
-                  ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
-                  : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-amber-300 border-neutral-700/60'
-              }`}
-              title="Запустить проверку готовности «Все на месте? 🍿»"
-            >
-              <span>🍿</span>
-              <span className="hidden sm:inline">Готовность</span>
-            </button>
+        <button
+          onClick={handleCopyLink}
+          className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition border border-neutral-700/60 cursor-pointer"
+          title="Скопировать ссылку для приглашения"
+        >
+          {copied ? (
+            <>
+              <Check className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="text-emerald-400">Скопировано!</span>
+            </>
+          ) : (
+            <>
+              <Share2 className="w-3.5 h-3.5" />
+              <span>Пригласить</span>
+            </>
           )}
-
-          <button
-            onClick={handleCopyLink}
-            className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition border border-neutral-700/60 cursor-pointer"
-            title="Скопировать ссылку для приглашения"
-          >
-            {copied ? (
-              <>
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
-                <span className="text-emerald-400">Скопировано!</span>
-              </>
-            ) : (
-              <>
-                <Share2 className="w-3.5 h-3.5" />
-                <span>Пригласить</span>
-              </>
-            )}
-          </button>
-        </div>
+        </button>
       </div>
 
       {/* Users List */}
@@ -215,12 +193,12 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
 
                     {/* Real-Time Watching Second */}
                     <div className="flex items-center gap-2 mt-1">
-                      <span className="text-[11px] font-mono tabular-nums text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-1.5 py-0.5 rounded flex items-center gap-1">
+                      <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-1.5 py-0.5 rounded flex items-center gap-1">
                         <Clock className="w-2.5 h-2.5" />
                         {formatTime(userTime)}
                       </span>
 
-                      <span className="text-[10px] text-neutral-500 truncate tabular-nums">
+                      <span className="text-[10px] text-neutral-500 truncate">
                         {user.isBuffering
                           ? 'Буферизация...'
                           : isUserHost
@@ -305,7 +283,7 @@ export const ParticipantsPanel: React.FC<ParticipantsPanelProps> = ({
                     title={`Громкость ${user.nickname}: ${peerMuted ? 0 : peerVol}%`}
                   />
 
-                  <span className="text-[10px] font-mono tabular-nums text-neutral-400 w-9 text-right shrink-0">
+                  <span className="text-[10px] font-mono text-neutral-400 w-9 text-right shrink-0">
                     {peerMuted ? '0%' : `${peerVol}%`}
                   </span>
 
