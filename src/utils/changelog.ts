@@ -1,4 +1,4 @@
-export const APP_VERSION = '1.0.5 Release';
+export const APP_VERSION = '1.0.6 Release';
 
 export type ChangelogTag = 'Release' | 'Beta' | 'Alpha';
 
@@ -11,6 +11,17 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: '1.0.6 Release',
+    date: '22.11.2026',
+    title: 'Оптимизация загрузки под высокий пинг (300+ мс)',
+    tag: 'Release',
+    changes: [
+      'Размер чанков увеличен до 6 МБ (в 3 раза меньше ожиданий HTTP-ответа на высоком пинге при сохранении буфера 1 МБ на сервере).',
+      'Добавлен режим «4 потока» по умолчанию (переключение 4 / 2 / 1 поток) для обхода лимита TCP BDP на удалённых серверах.',
+      'Автоочистка незавершённых загрузок больше не срабатывает, пока активны потоки записи чанков.',
+    ],
+  },
   {
     version: '1.0.5 Release',
     date: '22.11.2026',

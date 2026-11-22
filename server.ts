@@ -499,6 +499,7 @@ interface ChunkUploadSession {
   fileName: string;
   completedChunks: Set<number>;
   lastActivity: number;
+  activeWriters: number;
   isFinalizing: boolean;
   initPromise?: Promise<void>;
 }
@@ -551,13 +552,17 @@ function purgeRoom(roomId: string, reason = 'Комната закрыта. Вс
   rooms.delete(roomId);
 }
 
-// Auto-cleanup abandoned uploads older than 60 seconds (checks every 15 seconds)
+// Auto-cleanup truly abandoned uploads older than 5 minutes (never deletes while chunks are actively streaming)
 setInterval(async () => {
   const now = Date.now();
-  const ABANDONED_TIMEOUT_MS = 60 * 1000;
+  const ABANDONED_TIMEOUT_MS = 5 * 60 * 1000;
 
   for (const [fileId, session] of uploadSessions.entries()) {
-    if (!session.isFinalizing && now - session.lastActivity > ABANDONED_TIMEOUT_MS) {
+    if (
+      !session.isFinalizing &&
+      session.activeWriters === 0 &&
+      now - session.lastActivity > ABANDONED_TIMEOUT_MS
+    ) {
       console.log(
         `[Auto-Cleanup] Удалена заброшенная загрузка ${fileId} ("${session.fileName}") в комнате ${session.roomId}`
       );
@@ -920,6 +925,7 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
       fileName,
       completedChunks: new Set<number>(),
       lastActivity: Date.now(),
+      activeWriters: 0,
       isFinalizing: false,
     };
     uploadSessions.set(fileId, session);
@@ -956,12 +962,14 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
   let pendingChunks: Buffer[] = [];
   let pendingBytes = 0;
 
+  session.activeWriters += 1;
   try {
     fileHandle = await fsPromises.open(partPath, 'r+');
 
     for await (const rawChunk of req) {
       const buf = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
       if (buf.length === 0) continue;
+      session.lastActivity = Date.now();
       pendingChunks.push(buf);
       pendingBytes += buf.length;
 
@@ -1086,6 +1094,7 @@ app.post('/api/rooms/:roomId/upload/chunk', async (req, res) => {
       res.status(500).json({ error: 'Ошибка передачи или записи чанка' });
     }
   } finally {
+    session.activeWriters = Math.max(0, session.activeWriters - 1);
     if (fileHandle) {
       await fileHandle.close().catch(() => {});
     }

@@ -382,8 +382,13 @@ export const SpeedtestModal: React.FC<SpeedtestModalProps> = ({ isOpen, onClose 
     if (downloadMbps !== null && downloadMbps < 12) {
       issues.push(`Ограниченная скорость скачивания (${downloadMbps} Мбит/с).`);
     }
-    if (pingMs !== null && pingMs > 160) {
-      issues.push(`Высокий пинг (${pingMs} мс) — удалённый дата-центр или прокси.`);
+    if (pingMs !== null && pingMs >= 220) {
+      const approxSingleStreamKBs = Math.round(200 / (pingMs / 1000));
+      issues.push(
+        `Высокий пинг (${pingMs} мс) — из-за задержки TCP BDP 1 поток физически упирается примерно в ~${approxSingleStreamKBs} КБ/с. Используйте режим «4 потока» в Плейлисте или поднимите сервер ближе географически.`
+      );
+    } else if (pingMs !== null && pingMs > 160) {
+      issues.push(`Повышенный пинг (${pingMs} мс) — удалённый дата-центр или прокси.`);
     }
 
     const effectiveMbps = diskUploadMbps ?? uploadMbps;

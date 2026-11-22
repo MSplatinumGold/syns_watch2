@@ -15,7 +15,7 @@ import {
 import type { PlaylistItem } from '../types/watchparty.ts';
 import { formatBytes } from '../utils/format.ts';
 
-const CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB chunks (4 MB total in-flight across 2 streams) for fast turnaround & proxy friendliness
+const CHUNK_SIZE = 6 * 1024 * 1024; // 6 MB chunks: cuts high-ping (300+ ms RTT) HTTP turnaround pauses 3x while staying proxy-friendly
 
 function getCompletedBytes(completedSet: Set<number>, fileSize: number): number {
   let bytes = 0;
@@ -100,19 +100,22 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
   const [upload, setUpload] = useState<ResumableUploadState | null>(null);
   const [queuedCount, setQueuedCount] = useState(0);
   const [codecWarning, setCodecWarning] = useState<string | null>(null);
-  const [uploadConcurrency, setUploadConcurrency] = useState<1 | 2>(() => {
+  const [uploadConcurrency, setUploadConcurrency] = useState<1 | 2 | 4>(() => {
     try {
-      return localStorage.getItem('watchparty_upload_streams') === '1' ? 1 : 2;
+      const saved = localStorage.getItem('watchparty_upload_streams_v2');
+      if (saved === '1') return 1;
+      if (saved === '2') return 2;
+      return 4;
     } catch {
-      return 2;
+      return 4;
     }
   });
-  const uploadConcurrencyRef = useRef<1 | 2>(uploadConcurrency);
+  const uploadConcurrencyRef = useRef<1 | 2 | 4>(uploadConcurrency);
   uploadConcurrencyRef.current = uploadConcurrency;
 
   useEffect(() => {
     try {
-      localStorage.setItem('watchparty_upload_streams', String(uploadConcurrency));
+      localStorage.setItem('watchparty_upload_streams_v2', String(uploadConcurrency));
     } catch {}
   }, [uploadConcurrency]);
 
@@ -176,6 +179,7 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
         activeXhrsRef.current.add(xhr);
 
         xhr.open('POST', `/api/rooms/${roomId}/upload/chunk`);
+        xhr.timeout = 90000;
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
         xhr.setRequestHeader('x-host-token', hostToken);
         xhr.setRequestHeader('x-socket-id', socketId);
@@ -288,13 +292,18 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           reject(new Error('Загрузка чанка отменена'));
         };
 
+        xhr.ontimeout = () => {
+          activeXhrsRef.current.delete(xhr);
+          reject(new Error('Таймаут передачи чанка'));
+        };
+
         xhr.send(chunkBlob);
       });
     },
     [roomId, hostToken, socketId, emitRoomUploadProgress, onClearUploadProgress]
   );
 
-  // Concurrent (попутная) chunk upload loop with configurable concurrency pool (1 or 2 streams)
+  // Concurrent chunk upload loop with configurable concurrency pool (1, 2 or 4 streams)
   const uploadChunkLoop = useCallback(
     async (file: File, fileId: string, initialPendingChunks: number[]) => {
       const queue = [...initialPendingChunks];
@@ -557,11 +566,17 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => setUploadConcurrency((prev) => (prev === 2 ? 1 : 2))}
+              onClick={() =>
+                setUploadConcurrency((prev) => (prev === 4 ? 2 : prev === 2 ? 1 : 4))
+              }
               className="px-2 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-[11px] font-mono tabular-nums text-neutral-300 hover:text-white transition cursor-pointer"
-              title="Число параллельных потоков при загрузке видео (попробуйте 1 поток, если прокси режет скорость)"
+              title="Число параллельных потоков при загрузке видео (4 потока быстрее при пинге 200-300+ мс; 1-2 потока стабильнее через жёсткий прокси)"
             >
-              {uploadConcurrency === 1 ? '1 поток' : '2 потока'}
+              {uploadConcurrency === 1
+                ? '1 поток'
+                : uploadConcurrency === 2
+                ? '2 потока'
+                : '4 потока'}
             </button>
             <button
               onClick={() => fileInputRef.current?.click()}
