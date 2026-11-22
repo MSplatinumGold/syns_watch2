@@ -1,4 +1,4 @@
-export const APP_VERSION = '1.0.3 Release';
+export const APP_VERSION = '1.0.4 Release';
 
 export type ChangelogTag = 'Release' | 'Beta' | 'Alpha';
 
@@ -11,6 +11,17 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: '1.0.4 Release',
+    date: '22.11.2026',
+    title: 'Ускорение загрузки видео на 0.1 vCPU и буферизация записи',
+    tag: 'Release',
+    changes: [
+      'Серверная запись чанков переведена на пакетную запись по 1 МБ через FileHandle (в десятки раз меньше системных вызовов на 0.1 vCPU / контейнерных ФС).',
+      'Размер чанков оптимизирован до 2 МБ в 2 потока, а расчёт скорости загрузки переведён на скользящее окно без просадок.',
+      'Буфер чтения видеопотока увеличен до 512 КБ для более ровного стриминга.',
+    ],
+  },
   {
     version: '1.0.3 Release',
     date: '22.11.2026',

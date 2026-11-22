@@ -15,7 +15,18 @@ import {
 import type { PlaylistItem } from '../types/watchparty.ts';
 import { formatBytes } from '../utils/format.ts';
 
-const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB chunks for smoother throughput & fewer proxy timeouts on 0.1 vCPU
+const CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB chunks (4 MB total in-flight across 2 streams) for fast turnaround & proxy friendliness
+
+function getCompletedBytes(completedSet: Set<number>, fileSize: number): number {
+  let bytes = 0;
+  completedSet.forEach((idx) => {
+    const start = idx * CHUNK_SIZE;
+    if (start < fileSize) {
+      bytes += Math.min(CHUNK_SIZE, fileSize - start);
+    }
+  });
+  return bytes;
+}
 
 function formatRemainingTime(seconds: number): string {
   if (seconds <= 0 || !isFinite(seconds)) return '< 1 сек';
@@ -99,10 +110,8 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
     };
   }, []);
 
-  const speedTrackerRef = useRef<{ lastTime: number; lastTotalBytes: number }>({
-    lastTime: Date.now(),
-    lastTotalBytes: 0,
-  });
+  const speedSamplesRef = useRef<Array<{ time: number; bytes: number }>>([]);
+  const lastSpeedUiUpdateRef = useRef<number>(0);
   const lastBroadcastRef = useRef<{ time: number; percent: number; status: string }>({
     time: 0,
     percent: -1,
@@ -166,8 +175,8 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           if (isCancelledRef.current) return;
           chunkLoadedMapRef.current.set(chunkIndex, e.loaded);
 
-          // Aggregate uploaded bytes across all completed and concurrent in-flight chunks
-          const completedBytes = completedChunksSetRef.current.size * CHUNK_SIZE;
+          // Aggregate exact uploaded bytes across completed and in-flight chunks
+          const completedBytes = getCompletedBytes(completedChunksSetRef.current, file.size);
           let inFlightBytes = 0;
           chunkLoadedMapRef.current.forEach((bytes) => {
             inFlightBytes += bytes;
@@ -178,36 +187,35 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
           emitRoomUploadProgress(fileId, file.name, percent, 'uploading');
 
           const now = Date.now();
-          const dt = (now - speedTrackerRef.current.lastTime) / 1000;
-          if (dt >= 0.25) {
-            const dLoaded = totalUploadedSoFar - speedTrackerRef.current.lastTotalBytes;
-            speedTrackerRef.current.lastTime = now;
-            speedTrackerRef.current.lastTotalBytes = totalUploadedSoFar;
+          const samples = speedSamplesRef.current;
+          const lastSample = samples[samples.length - 1];
+          if (!lastSample || totalUploadedSoFar > lastSample.bytes) {
+            samples.push({ time: now, bytes: totalUploadedSoFar });
+          }
+          // Keep 3-second sliding window for accurate real throughput without artificial zero-drop
+          while (samples.length > 2 && now - samples[0].time > 3000) {
+            samples.shift();
+          }
 
-            const instantSpeed = dLoaded > 0 && dt > 0 ? dLoaded / dt : 0;
+          if (now - lastSpeedUiUpdateRef.current >= 250) {
+            lastSpeedUiUpdateRef.current = now;
+            const oldest = samples[0];
+            const newest = samples[samples.length - 1];
+            const windowDt = oldest && newest ? (newest.time - oldest.time) / 1000 : 0;
+            const windowBytes = oldest && newest ? newest.bytes - oldest.bytes : 0;
+            const windowSpeed = windowDt >= 0.2 && windowBytes > 0 ? windowBytes / windowDt : 0;
             const remainingBytes = Math.max(0, file.size - totalUploadedSoFar);
 
             setUpload((prev) => {
               if (!prev || prev.status !== 'uploading') return prev;
-              const smoothedSpeed =
-                prev.speed > 0 ? prev.speed * 0.65 + instantSpeed * 0.35 : instantSpeed;
-              const remainingSec =
-                smoothedSpeed > 0 ? Math.ceil(remainingBytes / smoothedSpeed) : 0;
+              const nextSpeed = windowSpeed > 0 ? windowSpeed : prev.speed;
+              const remainingSec = nextSpeed > 0 ? Math.ceil(remainingBytes / nextSpeed) : 0;
               return {
                 ...prev,
                 uploadedBytes: totalUploadedSoFar,
                 currentChunkIndex: completedChunksSetRef.current.size,
-                speed: smoothedSpeed,
+                speed: nextSpeed,
                 remainingSeconds: remainingSec,
-              };
-            });
-          } else {
-            setUpload((prev) => {
-              if (!prev || prev.status !== 'uploading') return prev;
-              return {
-                ...prev,
-                uploadedBytes: totalUploadedSoFar,
-                currentChunkIndex: completedChunksSetRef.current.size,
               };
             });
           }
@@ -295,13 +303,9 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
             if (isCancelledRef.current) return;
             try {
               if (attempt > 0) {
+                const doneBytes = getCompletedBytes(completedChunksSetRef.current, file.size);
                 const currentPercent =
-                  file.size > 0
-                    ? Math.min(
-                        99,
-                        Math.round(((completedChunksSetRef.current.size * CHUNK_SIZE) / file.size) * 100)
-                      )
-                    : 0;
+                  file.size > 0 ? Math.min(99, Math.round((doneBytes / file.size) * 100)) : 0;
                 emitRoomUploadProgress(fileId, file.name, currentPercent, 'retrying', true);
                 setUpload((prev) =>
                   prev ? { ...prev, status: 'retrying', retryAttempt: attempt } : null
@@ -327,13 +331,9 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
               if (isCancelledRef.current) return;
               attempt++;
               if (attempt > 3) {
+                const doneBytes = getCompletedBytes(completedChunksSetRef.current, file.size);
                 const currentPercent =
-                  file.size > 0
-                    ? Math.min(
-                        99,
-                        Math.round(((completedChunksSetRef.current.size * CHUNK_SIZE) / file.size) * 100)
-                      )
-                    : 0;
+                  file.size > 0 ? Math.min(99, Math.round((doneBytes / file.size) * 100)) : 0;
                 emitRoomUploadProgress(fileId, file.name, currentPercent, 'error', true);
                 setUpload((prev) =>
                   prev
@@ -369,7 +369,8 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       isCancelledRef.current = false;
       completedChunksSetRef.current.clear();
       chunkLoadedMapRef.current.clear();
-      speedTrackerRef.current = { lastTime: Date.now(), lastTotalBytes: 0 };
+      speedSamplesRef.current = [{ time: Date.now(), bytes: 0 }];
+      lastSpeedUiUpdateRef.current = Date.now();
 
       onRegisterLocalTrack?.(fileId, file);
 
@@ -451,10 +452,9 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       }
     } catch {}
 
+    const doneBytes = getCompletedBytes(completedChunksSetRef.current, upload.totalBytes);
     const currentPercent =
-      upload.totalBytes > 0
-        ? Math.min(99, Math.round(((completedChunksSetRef.current.size * CHUNK_SIZE) / upload.totalBytes) * 100))
-        : 0;
+      upload.totalBytes > 0 ? Math.min(99, Math.round((doneBytes / upload.totalBytes) * 100)) : 0;
     emitRoomUploadProgress(upload.fileId, upload.file.name, currentPercent, 'uploading', true);
 
     const totalChunks = Math.ceil(upload.file.size / CHUNK_SIZE);
@@ -465,10 +465,8 @@ export const PlaylistPanel: React.FC<PlaylistPanelProps> = ({
       }
     }
 
-    speedTrackerRef.current = {
-      lastTime: Date.now(),
-      lastTotalBytes: completedChunksSetRef.current.size * CHUNK_SIZE,
-    };
+    speedSamplesRef.current = [{ time: Date.now(), bytes: doneBytes }];
+    lastSpeedUiUpdateRef.current = Date.now();
 
     uploadChunkLoop(upload.file, upload.fileId, pendingChunks);
   };
