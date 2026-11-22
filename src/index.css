@@ -1,131 +1,10 @@
 @import "tailwindcss";
 
-:root {
-  --app-bg: #0a0a0a;
-  --scrollbar-track: rgba(15, 23, 42, 0.6);
-  --scrollbar-thumb: rgba(100, 116, 139, 0.4);
-  --scrollbar-thumb-hover: rgba(148, 163, 184, 0.7);
-}
-
-/* 1. Nordic Midnight: Cold Slate & Glacial Cyan */
-:root[data-theme="nordic"] {
-  --app-bg: #070b14;
-  --scrollbar-track: rgba(7, 11, 20, 0.75);
-  --scrollbar-thumb: rgba(56, 189, 248, 0.28);
-  --scrollbar-thumb-hover: rgba(56, 189, 248, 0.55);
-
-  --color-neutral-50: #f0f6ff;
-  --color-neutral-100: #e2ecf9;
-  --color-neutral-200: #cbd8ec;
-  --color-neutral-300: #a5b8d4;
-  --color-neutral-400: #7a91b4;
-  --color-neutral-500: #566d91;
-  --color-neutral-600: #3d5070;
-  --color-neutral-700: #253452;
-  --color-neutral-800: #162138;
-  --color-neutral-900: #0d1424;
-  --color-neutral-950: #070b14;
-
-  --color-rose-100: #e0f2fe;
-  --color-rose-200: #bae6fd;
-  --color-rose-300: #7dd3fc;
-  --color-rose-400: #38bdf8;
-  --color-rose-500: #0ea5e9;
-  --color-rose-600: #0284c7;
-  --color-rose-700: #0369a1;
-  --color-rose-800: #075985;
-  --color-rose-900: #0c4a6e;
-  --color-rose-950: #082f49;
-
-  --color-amber-100: #ccfbf1;
-  --color-amber-200: #99f6e4;
-  --color-amber-300: #5eead4;
-  --color-amber-400: #2dd4bf;
-  --color-amber-500: #14b8a6;
-  --color-amber-600: #0d9488;
-}
-
-/* 2. Velvet Espresso: Warm Vinyl, Terracotta & Gold */
-:root[data-theme="velvet"] {
-  --app-bg: #0f0b09;
-  --scrollbar-track: rgba(20, 14, 11, 0.75);
-  --scrollbar-thumb: rgba(217, 95, 59, 0.32);
-  --scrollbar-thumb-hover: rgba(234, 179, 8, 0.6);
-
-  --color-neutral-50: #fbf7f3;
-  --color-neutral-100: #f3ebe3;
-  --color-neutral-200: #e2d3c5;
-  --color-neutral-300: #c4afa0;
-  --color-neutral-400: #9d8575;
-  --color-neutral-500: #7a6456;
-  --color-neutral-600: #59463b;
-  --color-neutral-700: #3f2f27;
-  --color-neutral-800: #291e18;
-  --color-neutral-900: #1a1310;
-  --color-neutral-950: #0f0b09;
-
-  --color-rose-100: #ffedd5;
-  --color-rose-200: #fed7aa;
-  --color-rose-300: #fda47e;
-  --color-rose-400: #f07b54;
-  --color-rose-500: #e0633c;
-  --color-rose-600: #c84b28;
-  --color-rose-700: #a63a1e;
-  --color-rose-800: #852e19;
-  --color-rose-900: #692616;
-  --color-rose-950: #3d140b;
-
-  --color-amber-100: #fef3c7;
-  --color-amber-200: #fde68a;
-  --color-amber-300: #fcd34d;
-  --color-amber-400: #fbbf24;
-  --color-amber-500: #eab308;
-  --color-amber-600: #ca8a04;
-}
-
-/* 3. Tokyo Twilight (Sakura): Deep Indigo Plum, Orchid & Blossom */
-:root[data-theme="sakura"] {
-  --app-bg: #0b0713;
-  --scrollbar-track: rgba(16, 10, 28, 0.75);
-  --scrollbar-thumb: rgba(217, 70, 239, 0.3);
-  --scrollbar-thumb-hover: rgba(244, 114, 182, 0.6);
-
-  --color-neutral-50: #f8f5ff;
-  --color-neutral-100: #eee8fb;
-  --color-neutral-200: #dad0f2;
-  --color-neutral-300: #b8a8dc;
-  --color-neutral-400: #8f7db9;
-  --color-neutral-500: #6b5a94;
-  --color-neutral-600: #4c3d70;
-  --color-neutral-700: #352757;
-  --color-neutral-800: #21173a;
-  --color-neutral-900: #140e24;
-  --color-neutral-950: #0b0713;
-
-  --color-rose-100: #fae8ff;
-  --color-rose-200: #f5d0fe;
-  --color-rose-300: #f0abfc;
-  --color-rose-400: #e879f9;
-  --color-rose-500: #d946ef;
-  --color-rose-600: #c026d3;
-  --color-rose-700: #a21caf;
-  --color-rose-800: #86198f;
-  --color-rose-900: #701a75;
-  --color-rose-950: #4a044e;
-
-  --color-amber-100: #ffe4e6;
-  --color-amber-200: #fecdd3;
-  --color-amber-300: #fda4af;
-  --color-amber-400: #fb7185;
-  --color-amber-500: #f43f5e;
-  --color-amber-600: #e11d48;
-}
-
 html, body, #root {
   min-height: 100%;
   margin: 0;
   padding: 0;
-  background-color: var(--app-bg);
+  background-color: #0a0a0a;
 }
 
 @keyframes danmaku {
@@ -178,12 +57,12 @@ html, body, #root {
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--scrollbar-track);
+  background: rgba(15, 23, 42, 0.6);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb);
+  background: rgba(100, 116, 139, 0.4);
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--scrollbar-thumb-hover);
+  background: rgba(148, 163, 184, 0.7);
 }

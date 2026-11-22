@@ -214,24 +214,3 @@ export interface RoomState {
 2. Стриминг видео реализован в эндпоинте `/api/rooms/:roomId/stream/:fileId`.
 3. Все типы и события синхронизированы в `/src/types/watchparty.ts`.
 4. Для проверки сборки используются команды `npm run build` и `npm run lint`.
-
----
-
-### 8. АКТУАЛЬНЫЕ СКИЛЛЫ И ПРАВИЛА ПРОЕКТА
-Чтобы при продолжении работы в новом чате не искать правила заново, для SyncWatch Party закреплены следующие встроенные скиллы:
-
-1. **`real-time-and-multi-user`** (`/skills/system_skills/realtime_guidelines/SKILL.md`) — основной скилл бэкенда и синхронизации:
-   - Серверно-авторитативное состояние (`play`/`pause`/`seek`, `currentTrackIndex`, `hostId`).
-   - Изоляция комнат (`socket.join(roomId)`), точечные дельта-обновления, идемпотентность и обработка переподключений.
-   - Автоматическая очистка памяти и файлов комнаты при выходе участников или закрытии.
-2. **`frontend-design`** (`/skills/system_skills/frontend_design/SKILL.md`) + **`10_mobile_touch_apps.md`** (`/skills/system_skills/frontend_design/references/10_mobile_touch_apps.md`) — основной скилл UI/UX:
-   - Тёмная кинотеатральная тема с высоким контрастом, отсутствие горизонтального скролла и обрезанных элементов.
-   - Адаптив под десктоп (Landscape) и мобильные устройства/планшеты (Portrait), тач-зоны от `44x44px` и аккуратный скролл чата.
-3. **Опциональные скиллы** (подключать только при соответствующем запросе):
-   - **`applet-seo`** (`/skills/system_skills/applet_seo/SKILL.md`) — расширение OpenGraph/Twitter-метаданных и JSON-LD в `index.html`.
-   - **`pwa-integration`** (`/skills/system_skills/pwa_integration/SKILL.md`) — превращение приложения в устанавливаемое PWA (`vite-plugin-pwa`, манифест, иконки, оффлайн-индикатор).
-
-**Ограничения хостинга (0.1 vCPU / 512 MB RAM)**:
-- Стриминг только через нативный HTTP 206 (`Range`), без лишнего дублирования трафика и тяжёлой обработки медиа на сервере.
-- Запуск через `npm start` (`--max-old-space-size=384`), своевременная очистка таймеров, `storage/rooms/{roomId}` и активных загрузок.
-

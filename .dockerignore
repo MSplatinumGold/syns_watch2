@@ -1,9 +1,0 @@
-node_modules
-dist
-storage
-.git
-.aistudio
-*.log
-.env
-.env.*
-!.env.example

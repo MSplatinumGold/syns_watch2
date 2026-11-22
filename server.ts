@@ -45,18 +45,6 @@ interface ServerRoomState extends RoomState {
   lastActivityAt: number;
 }
 
-function toPublicRoomState(room: ServerRoomState): RoomState {
-  return {
-    roomId: room.roomId,
-    hostId: room.hostId,
-    users: room.users,
-    playlist: room.playlist,
-    currentTrackIndex: room.currentTrackIndex,
-    playbackState: room.playbackState,
-    activeUpload: room.activeUpload ?? null,
-  };
-}
-
 const MAX_CHAT_MEDIA_FILE_SIZE = 10 * 1024 * 1024; // 10 MB per file
 const MAX_CHAT_MEDIA_ROOM_TOTAL = 100 * 1024 * 1024; // 100 MB total per room
 const MAX_PLAYLIST_FILE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB max per video
@@ -1210,12 +1198,7 @@ app.post('/api/rooms/:roomId/chat/upload', (req, res) => {
     };
 
     registerChatMessage(roomId, messageId, socketId, mediaId);
-    const senderSocket = io.sockets.sockets.get(socketId);
-    if (senderSocket) {
-      senderSocket.to(roomId).emit('chat:message', message);
-    } else {
-      io.to(roomId).emit('chat:message', message);
-    }
+    io.to(roomId).emit('chat:message', message);
 
     if (parsedReplyTo && captionText) {
       const targetNick = room.users[parsedReplyTo.userId]?.nickname || parsedReplyTo.nickname;
@@ -1306,7 +1289,7 @@ app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
       'Accept-Ranges': 'bytes',
       'Content-Length': chunksize,
       'Content-Type': mimeType,
-      'Cache-Control': 'public, max-age=86400, immutable, no-transform',
+      'Cache-Control': 'public, max-age=86400, no-transform',
     });
 
     req.on('close', () => fileStream.destroy());
@@ -1316,7 +1299,7 @@ app.get('/api/rooms/:roomId/chat/media/:filename', async (req, res) => {
       'Content-Length': fileSize,
       'Content-Type': mimeType,
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'public, max-age=86400, immutable, no-transform',
+      'Cache-Control': 'public, max-age=86400, no-transform',
     });
     const fileStream = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
     req.on('close', () => fileStream.destroy());
@@ -1498,8 +1481,8 @@ io.on('connection', (socket) => {
 
     room.users[socket.id] = newUser;
 
-    // Send clean public state without private server fields (hostToken, creatorIp, etc.)
-    socket.emit('room:init_state', toPublicRoomState(room));
+    // Send state without NodeJS.Timeout handle
+    socket.emit('room:init_state', { ...room, emptyTimeoutId: null });
 
     // Notify other users
     socket.to(cleanRoomId).emit('room:user_joined', newUser);
@@ -2170,114 +2153,14 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(__dirname, 'dist');
-    const indexHtmlPath = path.join(distPath, 'index.html');
-    if (!fs.existsSync(indexHtmlPath)) {
+    if (!fs.existsSync(path.join(distPath, 'index.html'))) {
       console.error(
-        `[WatchParty Server] ОШИБКА: Файл ${indexHtmlPath} не найден! Убедитесь, что в Build Command выполняется "npm run build".`
+        `[WatchParty Server] ОШИБКА: Файл ${path.join(distPath, 'index.html')} не найден! Убедитесь, что в Build Command выполняется "npm run build".`
       );
     }
-
-    // Scan pre-compressed .br/.gz files once at startup (zero per-request fs.stat overhead on 0.1 vCPU)
-    const precompressedFiles = new Set<string>();
-    if (fs.existsSync(distPath)) {
-      const scanDist = (dir: string, relBase = '') => {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          const rel = `${relBase}/${entry.name}`;
-          const full = path.join(dir, entry.name);
-          if (entry.isDirectory()) {
-            scanDist(full, rel);
-          } else if (entry.name.endsWith('.br') || entry.name.endsWith('.gz')) {
-            precompressedFiles.add(rel);
-          }
-        }
-      };
-      scanDist(distPath);
-    }
-
-    const staticMimeTypes: Record<string, string> = {
-      '.js': 'application/javascript; charset=utf-8',
-      '.css': 'text/css; charset=utf-8',
-      '.html': 'text/html; charset=utf-8',
-      '.svg': 'image/svg+xml',
-      '.json': 'application/json; charset=utf-8',
-      '.tgs': 'application/gzip',
-    };
-
-    const getStaticCacheControl = (urlPath: string): string => {
-      if (urlPath === '/index.html' || urlPath.endsWith('.html')) {
-        return 'no-cache';
-      }
-      if (urlPath.startsWith('/assets/')) {
-        return 'public, max-age=2592000, immutable';
-      }
-      if (urlPath.startsWith('/stickers/')) {
-        return 'public, max-age=604800, immutable';
-      }
-      return 'public, max-age=86400';
-    };
-
-    // Serve pre-compressed .br / .gz assets with zero runtime CPU compression
-    app.use((req, res, next) => {
-      if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-      const reqPath = req.path === '/' ? '/index.html' : req.path;
-      if (reqPath.startsWith('/api/') || reqPath.startsWith('/socket.io/')) return next();
-
-      const acceptEnc = String(req.headers['accept-encoding'] || '');
-      let encoding: 'br' | 'gzip' | null = null;
-      let compressedRel = '';
-
-      if (acceptEnc.includes('br') && precompressedFiles.has(`${reqPath}.br`)) {
-        encoding = 'br';
-        compressedRel = `${reqPath}.br`;
-      } else if (acceptEnc.includes('gzip') && precompressedFiles.has(`${reqPath}.gz`)) {
-        encoding = 'gzip';
-        compressedRel = `${reqPath}.gz`;
-      }
-
-      if (!encoding) return next();
-
-      const resolvedPath = path.resolve(distPath, `.${compressedRel}`);
-      if (!resolvedPath.startsWith(distPath + path.sep)) return next();
-
-      const ext = path.extname(reqPath).toLowerCase();
-      res.setHeader('Content-Encoding', encoding);
-      res.setHeader('Vary', 'Accept-Encoding');
-      res.setHeader('Cache-Control', getStaticCacheControl(reqPath));
-      if (staticMimeTypes[ext]) {
-        res.setHeader('Content-Type', staticMimeTypes[ext]);
-      }
-      res.sendFile(resolvedPath);
-    });
-
-    app.use(
-      express.static(distPath, {
-        setHeaders: (res, filePath) => {
-          const relUrl = '/' + path.relative(distPath, filePath).replace(/\\/g, '/');
-          res.setHeader('Cache-Control', getStaticCacheControl(relUrl));
-        },
-      })
-    );
-
-    app.get('*', (req, res) => {
-      const acceptEnc = String(req.headers['accept-encoding'] || '');
-      if (acceptEnc.includes('br') && precompressedFiles.has('/index.html.br')) {
-        res.setHeader('Content-Encoding', 'br');
-        res.setHeader('Vary', 'Accept-Encoding');
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.sendFile(`${indexHtmlPath}.br`);
-        return;
-      }
-      if (acceptEnc.includes('gzip') && precompressedFiles.has('/index.html.gz')) {
-        res.setHeader('Content-Encoding', 'gzip');
-        res.setHeader('Vary', 'Accept-Encoding');
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.sendFile(`${indexHtmlPath}.gz`);
-        return;
-      }
-      res.setHeader('Cache-Control', 'no-cache');
-      res.sendFile(indexHtmlPath);
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 

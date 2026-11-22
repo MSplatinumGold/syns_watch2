@@ -17,6 +17,8 @@ import {
   UploadCloud,
   PanelRightClose,
   PanelRightOpen,
+  Download,
+  CheckCircle2,
 } from 'lucide-react';
 import type {
   PlaylistItem,
@@ -38,7 +40,6 @@ interface VideoPlayerProps {
   floatingEmojis?: FloatingEmojiItem[];
   isTheaterMode?: boolean;
   clockOffsetMs?: number;
-  localFileUrl?: string;
   onPlay: (currentTime: number) => void;
   onPause: (currentTime: number) => void;
   onSeek: (targetTime: number) => void;
@@ -62,7 +63,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   floatingEmojis = [],
   isTheaterMode,
   clockOffsetMs = 0,
-  localFileUrl,
   onPlay,
   onPause,
   onSeek,
@@ -80,7 +80,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isDraggingSeekRef = useRef(false);
   const lastProgressReportRef = useRef<number>(0);
-  const lastReportedSecondRef = useRef<number>(-1);
 
   // Sync reference anchor: { currentTime, serverTimestamp }
   const syncAnchorRef = useRef<{ currentTime: number; serverTimestamp: number }>({
@@ -106,9 +105,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const stageRef = useRef<HTMLDivElement>(null);
   const [stageDimensions, setStageDimensions] = useState<{ width: number; height: number } | null>(null);
 
+  // Item 2: Preload entire video in advance into browser memory / blob
+  const [preloadProgress, setPreloadProgress] = useState<number | null>(null);
+  const [isFullyPreloaded, setIsFullyPreloaded] = useState(false);
+  const [preloadedBlobUrl, setPreloadedBlobUrl] = useState<string | null>(null);
   const [bufferAheadSeconds, setBufferAheadSeconds] = useState(0);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
-  const [hasPlaybackStarted, setHasPlaybackStarted] = useState(false);
+  const preloadControllerRef = useRef<AbortController | null>(null);
+  const preloadedBlobUrlRef = useRef<string | null>(null);
+  preloadedBlobUrlRef.current = preloadedBlobUrl;
 
   const currentTimeRef = useRef(0);
   currentTimeRef.current = currentTime;
@@ -185,20 +190,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [playbackState.currentTime, playbackState.lastUpdatedServerTime]);
 
-  // Video source handling: prioritizes host's local File ObjectURL (0 server traffic), else network stream URL
-  const isLocalFile = Boolean(localFileUrl);
-  const videoSourceUrl = localFileUrl || currentTrack?.url;
+  // Video source handling: prioritizes local preloaded blob if available, else network stream URL
+  const videoSourceUrl = preloadedBlobUrl || currentTrack?.url;
 
-  // Track whether playback actually started for the current track (for metadata-only preload while idle)
-  useEffect(() => {
-    if (playbackState.isPlaying) {
-      setHasPlaybackStarted(true);
-    }
-  }, [playbackState.isPlaying]);
-
-  // Cleanup controls timer on unmount
+  // Cleanup preloaded blob, abort controller, and timers on unmount
   useEffect(() => {
     return () => {
+      if (preloadedBlobUrlRef.current) {
+        URL.revokeObjectURL(preloadedBlobUrlRef.current);
+        preloadedBlobUrlRef.current = null;
+      }
+      if (preloadControllerRef.current) {
+        preloadControllerRef.current.abort();
+        preloadControllerRef.current = null;
+      }
       if (controlsTimeoutRef.current) {
         clearTimeout(controlsTimeoutRef.current);
         controlsTimeoutRef.current = null;
@@ -206,15 +211,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, []);
 
-  // Track changed -> Immediately reset timecode, buffer, and preload flag
+  // Track changed -> Immediately reset timecode, buffer, and cached blob
   useEffect(() => {
     setCurrentTime(0);
     setBufferedPercent(0);
     setBufferAheadSeconds(0);
     setScrubbingTime(null);
-    setHasPlaybackStarted(false);
+    setIsFullyPreloaded(false);
+    setPreloadProgress(null);
+    if (preloadedBlobUrlRef.current) {
+      URL.revokeObjectURL(preloadedBlobUrlRef.current);
+      preloadedBlobUrlRef.current = null;
+      setPreloadedBlobUrl(null);
+    }
+    if (preloadControllerRef.current) {
+      preloadControllerRef.current.abort();
+      preloadControllerRef.current = null;
+    }
     setAutoplayBlocked(false);
-    lastReportedSecondRef.current = -1;
     syncAnchorRef.current = {
       currentTime: 0,
       serverTimestamp: getServerNow(),
@@ -224,7 +238,83 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [currentTrack?.id, currentTrackIndex, getServerNow]);
 
-  // Monitor native browser video buffer without any phantom network requests
+  // Handler to preload full video in advance into browser memory (Item 2)
+  const handlePreloadFullVideo = async () => {
+    const rawUrl = currentTrack?.url;
+    if (!rawUrl || preloadProgress !== null || isFullyPreloaded) return;
+
+    setPreloadProgress(0);
+    const controller = new AbortController();
+    preloadControllerRef.current = controller;
+
+    try {
+      const res = await fetch(rawUrl, {
+        signal: controller.signal,
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const total = parseInt(
+        res.headers.get('content-length') || `${currentTrack?.size || 0}`,
+        10
+      );
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('ReadableStream not supported');
+
+      const chunks: Uint8Array[] = [];
+      let loaded = 0;
+      let lastProgressUpdate = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          loaded += value.length;
+          if (total > 0) {
+            const now = Date.now();
+            const pct = Math.min(100, Math.round((loaded / total) * 100));
+            if (now - lastProgressUpdate >= 200 || pct === 100) {
+              lastProgressUpdate = now;
+              setPreloadProgress(pct);
+            }
+          }
+        }
+      }
+
+      const mime = currentTrack?.mimeType || 'video/mp4';
+      const blob = new Blob(chunks as unknown as BlobPart[], { type: mime });
+      chunks.length = 0; // Release chunk array references promptly to reduce peak RAM
+
+      if (preloadedBlobUrlRef.current) {
+        URL.revokeObjectURL(preloadedBlobUrlRef.current);
+      }
+      const blobUrl = URL.createObjectURL(blob);
+      preloadedBlobUrlRef.current = blobUrl;
+
+      setPreloadedBlobUrl(blobUrl);
+      setIsFullyPreloaded(true);
+      setPreloadProgress(null);
+
+      // Seamlessly switch video source without losing playback position
+      if (videoRef.current) {
+        const curTime = videoRef.current.currentTime;
+        const wasPlaying = !videoRef.current.paused;
+        videoRef.current.src = blobUrl;
+        videoRef.current.currentTime = curTime;
+        if (wasPlaying) {
+          videoRef.current.play().catch(() => {});
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        console.error('Full video preload error:', err);
+      }
+      setPreloadProgress(null);
+    }
+  };
+
+  // Monitor native browser video buffer without any phantom network requests (Option 1)
   useEffect(() => {
     if (!videoSourceUrl) return;
 
@@ -232,7 +322,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const video = videoRef.current;
       if (!video || !duration || duration <= 0) return;
 
-      if (isLocalFile) {
+      if (isFullyPreloaded) {
         setBufferAheadSeconds(duration);
         return;
       }
@@ -250,7 +340,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }, 1000);
 
     return () => clearInterval(bufferCheckInterval);
-  }, [videoSourceUrl, duration, isLocalFile]);
+  }, [videoSourceUrl, duration, isFullyPreloaded]);
 
   // Track Ended -> Host trigger auto next or pause if last track (Item 1)
   const handleEnded = useCallback(() => {
@@ -266,9 +356,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [isHost, currentTrackIndex, playlist.length, duration, onTrackEnded, onPause]);
 
-  // Smart buffer margin check (avoid micro-stalls if healthy buffer margin is present or playing locally)
+  // Smart buffer margin check (Item 2: avoid micro-stalls if healthy buffer margin is present)
   const handleBufferingCheck = useCallback(() => {
-    if (isLocalFile) return;
     const video = videoRef.current;
     if (!video || !video.duration) return;
     let bufferAhead = 0;
@@ -283,7 +372,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (bufferAhead < 0.5) {
       onBufferingStart();
     }
-  }, [isLocalFile, onBufferingStart]);
+  }, [onBufferingStart]);
 
   // Sync bus drift correction loop (spec 4.1 & item 7: 1.05x / 0.95x smooth adjustment)
   useEffect(() => {
@@ -408,7 +497,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, []);
 
-  // Update current time display and report progress to server (throttled & integer-rounded)
+  // Update current time display and report progress to server
   const handleTimeUpdate = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -418,16 +507,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
     updateBuffer();
 
-    // Only emit progress while actively playing, rounded to whole seconds, max once per 3s
-    if (!playbackState.isPlaying || playbackState.isSystemPausedForBuffering || !onProgressReport) {
-      return;
-    }
-    const wholeSec = Math.floor(video.currentTime);
+    // Report progress to other users every ~2 seconds to save WebSocket traffic
     const now = Date.now();
-    if (wholeSec !== lastReportedSecondRef.current && now - lastProgressReportRef.current >= 3000) {
+    if (now - lastProgressReportRef.current > 2000 && onProgressReport) {
       lastProgressReportRef.current = now;
-      lastReportedSecondRef.current = wholeSec;
-      onProgressReport(wholeSec);
+      onProgressReport(video.currentTime);
     }
   };
 
@@ -739,7 +823,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         <video
           ref={videoRef}
           src={videoSourceUrl}
-          preload={isLocalFile || playbackState.isPlaying || hasPlaybackStarted ? 'auto' : 'metadata'}
+          preload="auto"
           playsInline
           className="w-full h-full object-contain"
           onTimeUpdate={handleTimeUpdate}
@@ -1001,27 +1085,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <span>{formatTime(duration)}</span>
             </div>
 
-            {/* Native Buffer / Local File Indicator */}
+            {/* Native Buffer / Cache Indicator */}
             {videoSourceUrl && duration > 0 && (
               <div
                 className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900/90 border border-neutral-700/60 text-[11px] font-mono"
                 title={
-                  isLocalFile
-                    ? 'Видео воспроизводится с вашего устройства (0 байт входящего трафика)'
+                  isFullyPreloaded
+                    ? 'Видео полностью сохранено в памяти браузера (0 сетевых запросов при просмотре)'
                     : bufferAheadSeconds > 0
                     ? `Нативный буфер браузера: +${Math.round(bufferAheadSeconds)} сек запаса (HTTP 206 стриминг)`
                     : 'Потоковое воспроизведение (HTTP 206)'
                 }
               >
-                <span className={isLocalFile || bufferAheadSeconds >= 10 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                <span className={isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
                   ⚡
                 </span>
                 <span className="text-neutral-400">
-                  {isLocalFile ? 'Файл:' : 'Буфер:'}
+                  {isFullyPreloaded ? 'Кэш:' : 'Буфер:'}
                 </span>
-                <span className={isLocalFile || bufferAheadSeconds >= 10 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
-                  {isLocalFile
-                    ? 'Локально'
+                <span className={isFullyPreloaded || bufferAheadSeconds >= 10 ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
+                  {isFullyPreloaded
+                    ? '100%'
                     : bufferAheadSeconds >= 60
                     ? `+${Math.floor(bufferAheadSeconds / 60)}:${Math.floor(bufferAheadSeconds % 60).toString().padStart(2, '0')}`
                     : `+${Math.round(bufferAheadSeconds)}с`}
@@ -1096,6 +1180,39 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   <Clock className="w-3 h-3" />
                 </button>
               </form>
+            )}
+
+            {/* Full Video Preload Button (Item 2: Загрузить всё видео сразу в память) */}
+            {videoSourceUrl && (
+              <>
+                {isFullyPreloaded ? (
+                  <div
+                    className="px-2 py-1 rounded-lg bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-medium flex items-center gap-1.5"
+                    title="Видео загружено целиком в локальную память браузера. Поток не докачивается при просмотре."
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span className="hidden md:inline">В кэше 100%</span>
+                  </div>
+                ) : preloadProgress !== null ? (
+                  <div
+                    className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-700 text-xs font-mono text-amber-300 flex items-center gap-1.5"
+                    title="Идет полная предзагрузка видео в кэш браузера..."
+                  >
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                    <span>{preloadProgress}%</span>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handlePreloadFullVideo}
+                    className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white border border-neutral-700 text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+                    title="Загрузить видео целиком в память браузера сразу, чтобы не докачивать поток во время просмотра"
+                  >
+                    <Download className="w-3.5 h-3.5 text-rose-400" />
+                    <span className="hidden md:inline">Предзагрузить всё</span>
+                  </button>
+                )}
+              </>
             )}
 
             {/* Theater Mode Toggle (Hide/Show sidebar on PC) */}

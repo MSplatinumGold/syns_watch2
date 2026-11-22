@@ -24,12 +24,6 @@ import { PlaylistPanel } from './components/PlaylistPanel.tsx';
 import { ParticipantsPanel } from './components/ParticipantsPanel.tsx';
 import { JoinModal } from './components/JoinModal.tsx';
 import {
-  clearAllSessionMediaCaches,
-  registerLocalTrackFile,
-  revokeLocalTrackUrl,
-} from './utils/mediaCache.ts';
-import { applyUiTheme, getSavedUiTheme, type UiThemeId } from './utils/themes.ts';
-import {
   MessageSquare,
   Film,
   Users,
@@ -59,14 +53,8 @@ export default function App() {
   const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
   const [bufferingUsers, setBufferingUsers] = useState<string[]>([]);
   const [roomUploadProgress, setRoomUploadProgress] = useState<RoomUploadProgress | null>(null);
-  const [localTrackUrls, setLocalTrackUrls] = useState<Record<string, string>>({});
-  const [uiTheme, setUiTheme] = useState<UiThemeId>(() => getSavedUiTheme());
 
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
-  const roomIdRef = useRef<string | null>(null);
-  roomIdRef.current = roomId;
-  const loadedChatRoomRef = useRef<string | null>(null);
-  const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const nicknameRef = useRef<string>('');
   nicknameRef.current = nickname;
 
@@ -107,53 +95,6 @@ export default function App() {
     danmakuTimersRef.current.clear();
     emojiTimersRef.current.forEach(clearTimeout);
     emojiTimersRef.current.clear();
-  }, []);
-
-  // Load cached chat history from sessionStorage when entering a room (persists across F5 until tab/room closes)
-  useEffect(() => {
-    if (!roomId) {
-      loadedChatRoomRef.current = null;
-      seenMessageIdsRef.current.clear();
-      return;
-    }
-    try {
-      const raw = sessionStorage.getItem(`watchparty_chat_${roomId}`);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          const valid = parsed.filter(
-            (m): m is ChatMessage => Boolean(m && typeof m.id === 'string' && typeof m.timestamp === 'number')
-          ).slice(-250);
-          seenMessageIdsRef.current = new Set(valid.map((m) => m.id));
-          setMessages(valid);
-        }
-      } else {
-        seenMessageIdsRef.current.clear();
-      }
-    } catch {
-      seenMessageIdsRef.current.clear();
-    }
-    loadedChatRoomRef.current = roomId;
-  }, [roomId]);
-
-  // Persist chat history in sessionStorage for the current tab session
-  useEffect(() => {
-    if (!roomId || loadedChatRoomRef.current !== roomId) return;
-    try {
-      sessionStorage.setItem(`watchparty_chat_${roomId}`, JSON.stringify(messages.slice(-250)));
-    } catch {}
-  }, [messages, roomId]);
-
-  // Persist & apply selected UI theme
-  useEffect(() => {
-    applyUiTheme(uiTheme);
-  }, [uiTheme]);
-
-  // Ensure session Blob URLs are released when App unmounts
-  useEffect(() => {
-    return () => {
-      clearAllSessionMediaCaches();
-    };
   }, []);
 
   useEffect(() => {
@@ -550,15 +491,8 @@ export default function App() {
 
     const typingTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
-    // Chat message received (deduplicated & capped at 250 messages in memory)
+    // Chat message received (capped at 250 messages in memory for smooth scrolling)
     socket.on('chat:message', (message: ChatMessage) => {
-      if (seenMessageIdsRef.current.has(message.id)) return;
-      seenMessageIdsRef.current.add(message.id);
-      if (seenMessageIdsRef.current.size > 400) {
-        const oldest = seenMessageIdsRef.current.values().next().value;
-        if (oldest) seenMessageIdsRef.current.delete(oldest);
-      }
-
       setMessages((prev) => [...prev, message].slice(-250));
 
       if (message.type === 'message') {
@@ -739,16 +673,6 @@ export default function App() {
   // Leave room flow
   const handleLeaveRoom = () => {
     clearOverlayTimers();
-    clearAllSessionMediaCaches();
-    setLocalTrackUrls({});
-    const currentRId = roomIdRef.current;
-    if (currentRId) {
-      try {
-        sessionStorage.removeItem(`watchparty_chat_${currentRId}`);
-      } catch {}
-    }
-    loadedChatRoomRef.current = null;
-    seenMessageIdsRef.current.clear();
     if (socketRef.current) {
       socketRef.current.disconnect();
     }
@@ -828,30 +752,8 @@ export default function App() {
     socketRef.current?.emit('host:reorder_playlist', { newOrderIds });
   }, []);
 
-  const handleRegisterLocalTrack = useCallback((fileId: string, file: File) => {
-    const blobUrl = registerLocalTrackFile(fileId, file);
-    setLocalTrackUrls((prev) => ({ ...prev, [fileId]: blobUrl }));
-  }, []);
-
-  const handleRevokeLocalTrack = useCallback((fileId: string) => {
-    revokeLocalTrackUrl(fileId);
-    setLocalTrackUrls((prev) => {
-      if (!prev[fileId]) return prev;
-      const next = { ...prev };
-      delete next[fileId];
-      return next;
-    });
-  }, []);
-
   const handleDeleteTrack = useCallback((fileId: string) => {
-    handleRevokeLocalTrack(fileId);
     socketRef.current?.emit('host:delete_track', { fileId });
-  }, [handleRevokeLocalTrack]);
-
-  const handleLocalMediaMessageSent = useCallback((message: ChatMessage) => {
-    if (seenMessageIdsRef.current.has(message.id)) return;
-    seenMessageIdsRef.current.add(message.id);
-    setMessages((prev) => [...prev, message].slice(-250));
   }, []);
 
   const handleTransferHost = useCallback((newHostUserId: string) => {
@@ -969,8 +871,6 @@ export default function App() {
         {NoticeBanner}
         <JoinModal
           initialRoomId={initialUrlRoomId}
-          uiTheme={uiTheme}
-          onChangeUiTheme={setUiTheme}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
         />
@@ -1058,7 +958,6 @@ export default function App() {
           onTypingChange={handleTypingChange}
           onSendFloatingEmoji={handleSendFloatingEmoji}
           onSeekToTimecode={handleSeek}
-          onLocalMediaMessageSent={handleLocalMediaMessageSent}
         />
       </div>
 
@@ -1070,9 +969,6 @@ export default function App() {
           roomId={roomId}
           hostToken={hostToken}
           socketId={socketId}
-          localTrackUrls={localTrackUrls}
-          onRegisterLocalTrack={handleRegisterLocalTrack}
-          onRevokeLocalTrack={handleRevokeLocalTrack}
           onChangeTrack={handleChangeTrack}
           onReorder={handleReorderPlaylist}
           onDeleteTrack={handleDeleteTrack}
@@ -1110,8 +1006,6 @@ export default function App() {
         nickname={nickname}
         userCount={userCount}
         isConnected={isConnected}
-        uiTheme={uiTheme}
-        onChangeUiTheme={setUiTheme}
         onChangeNickname={handleChangeNickname}
         onLeaveRoom={handleLeaveRoom}
         onCloseRoom={handleCloseRoom}
@@ -1155,7 +1049,6 @@ export default function App() {
             currentTrackIndex={roomState?.currentTrackIndex || 0}
             isHost={isHost}
             clockOffsetMs={clockOffsetMs}
-            localFileUrl={currentTrack ? localTrackUrls[currentTrack.id] : undefined}
             playbackState={
               roomState?.playbackState || {
                 isPlaying: false,
